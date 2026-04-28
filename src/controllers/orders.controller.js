@@ -32,6 +32,7 @@ async function getOrders(req, res) {
     const to = req.query.to ? new Date(req.query.to) : defaultRange.to;
 
     const status = req.query.status;
+    const employeeId = req.query.employeeId;
 
     if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
       res.status(400).json({
@@ -48,6 +49,7 @@ async function getOrders(req, res) {
       from,
       to,
       status,
+      employeeId,
     });
 
     res.json({
@@ -77,7 +79,8 @@ async function changeOrderStatus(req, res) {
       return;
     }
 
-    const updatedOrder = await updateOrderStatus(orderId, status);
+    const changedBy = req.user?.id;
+    const updatedOrder = await updateOrderStatus(orderId, status, changedBy);
 
     res.json({
       success: true,
@@ -98,6 +101,14 @@ async function changeOrderStatus(req, res) {
       res.status(404).json({
         success: false,
         message: "Order not found",
+      });
+      return;
+    }
+
+    if (error.code === "UNAUTHORIZED") {
+      res.status(401).json({
+        success: false,
+        message: "Unauthorized",
       });
       return;
     }
@@ -149,7 +160,8 @@ async function updateOrder(req, res) {
       return;
     }
 
-    const updatedOrder = await editOrder(orderId, updates);
+    const changedBy = req.user?.id;
+    const updatedOrder = await editOrder(orderId, updates, changedBy);
 
     res.json({
       success: true,
@@ -178,6 +190,14 @@ async function updateOrder(req, res) {
       res.status(404).json({
         success: false,
         message: "Order not found",
+      });
+      return;
+    }
+
+    if (error.code === "UNAUTHORIZED") {
+      res.status(401).json({
+        success: false,
+        message: "Unauthorized",
       });
       return;
     }
