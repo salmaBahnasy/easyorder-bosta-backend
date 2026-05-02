@@ -5,6 +5,7 @@ const {
   getWebhookOrders,
   updateOrderStatus,
   editOrder,
+  getOrdersStatistics,
   ALLOWED_ORDER_STATUSES,
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
@@ -271,30 +272,70 @@ async function sendOrderToBosta(req, res) {
   }
 }
 
+function normalizeQueryId(value) {
+  if (value == null) return null;
+  const raw = Array.isArray(value) ? value[0] : value;
+  const s = String(raw).trim();
+  return s || null;
+}
+
 async function getOrdersStats(req, res) {
   try {
-    const supabase = require("../config/supabase");
-    const TABLE = process.env.SUPABASE_ORDERS_TABLE || "orders";
+    const employeeId = normalizeQueryId(
+      req.query.employeeId || req.query.userId || req.query.employee_id,
+    );
 
-    const { data, error } = await supabase.from(TABLE).select("status,total");
+    let from = null;
+    let to = null;
 
-    if (error) throw error;
+    if (req.query.from) {
+      from = new Date(req.query.from);
+      if (Number.isNaN(from.getTime())) {
+        res.status(400).json({
+          success: false,
+          message: "Invalid from date",
+        });
+        return;
+      }
+    }
 
-    const totalOrders = data.length;
-    const totalRevenue = data.reduce((sum, o) => sum + Number(o.total || 0), 0);
+    if (req.query.to) {
+      to = new Date(req.query.to);
+      if (Number.isNaN(to.getTime())) {
+        res.status(400).json({
+          success: false,
+          message: "Invalid to date",
+        });
+        return;
+      }
+    }
 
-    const stats = {
-      totalOrders,
-      newOrders: data.filter((o) => o.status === "new").length,
-      confirmedOrders: data.filter((o) => o.status === "Confirmed").length,
-      shippedOrders: data.filter((o) => o.status === "Shipped").length,
-      canceledOrders: data.filter((o) => o.status === "canceled").length,
-      noReplyOrders: data.filter((o) => o.status === "no_replay").length,
-      totalRevenue,
-      averageOrderValue: totalOrders > 0 ? totalRevenue / totalOrders : 0,
+    const stats = await getOrdersStatistics({
+      employeeId,
+      from,
+      to,
+    });
+
+    const statsWithLegacyKeys = {
+      ...stats,
+      newOrders: stats.new,
+      confirmedOrders: stats.Confirmed,
+      shippedOrders: stats.Shipped,
+      canceledOrders: stats.canceled,
+      noReplyOrders: stats.no_replay,
+      followUpOrders: stats.follow_up,
+      repeaterOrders: stats.repeater,
     };
 
-    res.json({ success: true, stats });
+    res.json({
+      success: true,
+      filters: {
+        employeeId,
+        from: from ? from.toISOString() : null,
+        to: to ? to.toISOString() : null,
+      },
+      stats: statsWithLegacyKeys,
+    });
   } catch (error) {
     res.status(500).json({
       success: false,

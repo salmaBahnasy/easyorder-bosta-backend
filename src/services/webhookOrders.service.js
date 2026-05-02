@@ -301,10 +301,122 @@ async function editOrder(orderId, updates, changedBy) {
   };
 }
 
+const STATS_STATUS_KEYS = {
+  canceled: "canceled",
+  no_replay: "no_replay",
+  follow_up: "follow up",
+  repeater: "repeater",
+  Confirmed: "Confirmed",
+  Shipped: "Shipped",
+  new: "new",
+};
+
+const IN_CHUNK_SIZE = 120;
+
+function chunkArray(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) {
+    out.push(arr.slice(i, i + size));
+  }
+  return out;
+}
+
+/**
+ * Order counts by status. Optional employeeId = only orders that appear in
+ * order_status_logs for that employee (same semantics as GET /api/orders?employeeId=).
+ * Optional from/to filter on orders.created_at (inclusive).
+ */
+async function getOrdersStatistics({ employeeId, from, to }) {
+  let orderIds = null;
+
+  const employeeKey =
+    typeof employeeId === "string" ? employeeId.trim() : employeeId;
+
+  if (employeeKey) {
+    const { data: logs, error: logsError } = await supabase
+      .from(ORDER_STATUS_LOGS_TABLE)
+      .select("order_id")
+      .eq("changed_by", employeeKey);
+
+    if (logsError) {
+      throw new Error(logsError.message);
+    }
+
+    orderIds = [...new Set((logs || []).map((r) => r.order_id).filter(Boolean))];
+
+    if (!orderIds.length) {
+      return {
+        totalOrders: 0,
+        canceled: 0,
+        no_replay: 0,
+        follow_up: 0,
+        repeater: 0,
+        Confirmed: 0,
+        Shipped: 0,
+        new: 0,
+      };
+    }
+  }
+
+  const chunks =
+    orderIds == null ? [null] : chunkArray(orderIds, IN_CHUNK_SIZE);
+
+  async function countWithChunks(status) {
+    let sum = 0;
+    for (const chunk of chunks) {
+      let q = supabase
+        .from(ORDERS_TABLE)
+        .select("*", { count: "exact", head: true });
+
+      if (chunk) q = q.in("order_id", chunk);
+      if (from) q = q.gte("created_at", from.toISOString());
+      if (to) q = q.lte("created_at", to.toISOString());
+      if (status) q = q.eq("status", status);
+
+      const { count, error } = await q;
+      if (error) throw new Error(error.message);
+      sum += count || 0;
+    }
+    return sum;
+  }
+
+  const byStatus = {};
+  for (const [key, dbStatus] of Object.entries(STATS_STATUS_KEYS)) {
+    byStatus[key] = await countWithChunks(dbStatus);
+  }
+
+  let totalOrders = 0;
+  for (const chunk of chunks) {
+    let q = supabase
+      .from(ORDERS_TABLE)
+      .select("*", { count: "exact", head: true });
+
+    if (chunk) q = q.in("order_id", chunk);
+    if (from) q = q.gte("created_at", from.toISOString());
+    if (to) q = q.lte("created_at", to.toISOString());
+
+    const { count, error } = await q;
+    if (error) throw new Error(error.message);
+    totalOrders += count || 0;
+  }
+
+  return {
+    totalOrders,
+    canceled: byStatus.canceled,
+    no_replay: byStatus.no_replay,
+    follow_up: byStatus.follow_up,
+    repeater: byStatus.repeater,
+    Confirmed: byStatus.Confirmed,
+    Shipped: byStatus.Shipped,
+    new: byStatus.new,
+  };
+}
+
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
   updateOrderStatus,
   editOrder,
+  getOrdersStatistics,
   ALLOWED_ORDER_STATUSES,
 };
