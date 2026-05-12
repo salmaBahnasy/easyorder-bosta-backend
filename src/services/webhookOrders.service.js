@@ -105,6 +105,40 @@ function resolveOrderMeta(payload, options = {}) {
 const ORDERS_TABLE = process.env.SUPABASE_ORDERS_TABLE || "orders";
 const ORDER_STATUS_LOGS_TABLE =
   process.env.SUPABASE_ORDER_STATUS_LOGS_TABLE || "order_status_logs";
+const EMPLOYEES_TABLE = process.env.SUPABASE_EMPLOYEES_TABLE || "employees";
+
+/** لتطابق إيميل في ILIKE دون اعتبار % أو _ حرفين خاصين */
+function escapeIlikeLiteral(value) {
+  return String(value)
+    .trim()
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+}
+
+/**
+ * فلتر الموظف يستخدم order_status_logs.changed_by = id الموظف.
+ * إذا مرّرت إيميلاً (يحتوي @) نُحلّه إلى id من جدول employees.
+ */
+async function resolveEmployeeToIdForLogs(employeeFilter) {
+  const raw = String(employeeFilter).trim();
+  if (!raw) return null;
+  if (!raw.includes("@")) return raw;
+
+  const literal = escapeIlikeLiteral(raw);
+  const { data, error } = await supabase
+    .from(EMPLOYEES_TABLE)
+    .select("id")
+    .ilike("email", literal)
+    .limit(1);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const row = Array.isArray(data) && data.length ? data[0] : null;
+  return row?.id != null ? String(row.id) : null;
+}
 
 async function insertOrderStatusLog({
   orderId,
@@ -200,10 +234,23 @@ async function getWebhookOrders({
   let orderIdsByEmployee = null;
 
   if (employeeId) {
+    const changedByKey = await resolveEmployeeToIdForLogs(employeeId);
+    if (String(employeeId).trim().includes("@") && !changedByKey) {
+      return {
+        page,
+        limit,
+        total: 0,
+        totalPages: 1,
+        data: [],
+      };
+    }
+
+    const keyForLogs = changedByKey || String(employeeId).trim();
+
     const { data: logs, error: logsError } = await supabase
       .from(ORDER_STATUS_LOGS_TABLE)
       .select("order_id")
-      .eq("changed_by", employeeId);
+      .eq("changed_by", keyForLogs);
 
     if (logsError) {
       throw new Error(logsError.message);
@@ -495,10 +542,26 @@ async function getOrdersStatistics({ employeeId, from, to }) {
     typeof employeeId === "string" ? employeeId.trim() : employeeId;
 
   if (employeeKey) {
+    const changedByKey = await resolveEmployeeToIdForLogs(employeeKey);
+    if (String(employeeKey).includes("@") && !changedByKey) {
+      return {
+        totalOrders: 0,
+        canceled: 0,
+        no_replay: 0,
+        follow_up: 0,
+        repeater: 0,
+        Confirmed: 0,
+        Shipped: 0,
+        new: 0,
+      };
+    }
+
+    const keyForLogs = changedByKey || String(employeeKey);
+
     const { data: logs, error: logsError } = await supabase
       .from(ORDER_STATUS_LOGS_TABLE)
       .select("order_id")
-      .eq("changed_by", employeeKey);
+      .eq("changed_by", keyForLogs);
 
     if (logsError) {
       throw new Error(logsError.message);

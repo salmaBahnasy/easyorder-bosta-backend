@@ -169,7 +169,7 @@ async function getOrders(req, res) {
       },
       appliedFilters,
       listOrdersQueryReference:
-        "GET /api/orders?from=ISO8601&to=ISO8601&status=&employeeId|employee_id=&order_source=&order_type=&shipping_status=&product_id|productId=&product_sku|productSku=&page=&limit=",
+        "GET /api/orders?from=ISO8601&to=ISO8601&status=&employeeId|employee_id= (uuid الموظف أو إيميله)&order_source=&order_type=&shipping_status=&product_id|productId=&product_sku|productSku=&page=&limit=",
       ...result,
     });
   } catch (error) {
