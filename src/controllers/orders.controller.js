@@ -38,6 +38,37 @@ function publicRequestUrl(req) {
   return `${proto}://${host}${req.originalUrl}`;
 }
 
+/** إعادة بناء رابط القائمة من المعاملات المفسَّرة (أوضح من originalUrl خلف البروكسي، ويُظهر employee_id وغيره). */
+function buildCanonicalOrdersListUrl(req) {
+  const host = req.get("x-forwarded-host") || req.get("host") || "localhost";
+  const proto = req.get("x-forwarded-proto") || req.protocol || "http";
+  const pathPart = `${req.baseUrl || ""}${req.path === "/" ? "" : req.path}`;
+
+  const params = new URLSearchParams();
+  for (const [key, raw] of Object.entries(req.query || {})) {
+    if (raw === undefined || raw === null) continue;
+    const values = Array.isArray(raw) ? raw : [raw];
+    for (const v of values) {
+      if (v === undefined || v === null) continue;
+      const s = String(v).trim();
+      if (s === "") continue;
+      params.append(key, s);
+    }
+  }
+
+  const qs = params.toString();
+  return `${proto}://${host}${pathPart}${qs ? `?${qs}` : ""}`;
+}
+
+function shallowQueryEcho(req) {
+  const out = {};
+  for (const [k, v] of Object.entries(req.query || {})) {
+    if (Array.isArray(v)) out[k] = [...v];
+    else out[k] = v;
+  }
+  return out;
+}
+
 function postOrdersAbsoluteUrl(req) {
   const host = req.get("x-forwarded-host") || req.get("host") || "localhost";
   const proto = req.get("x-forwarded-proto") || req.protocol || "http";
@@ -93,6 +124,12 @@ async function getOrders(req, res) {
     const product_sku = optionalQueryParam(
       req.query.product_sku || req.query.productSku,
     );
+    const phone = optionalQueryParam(
+      req.query.phone ||
+        req.query.mobile ||
+        req.query.customerPhone ||
+        req.query.customer_phone,
+    );
 
     if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
       res.status(400).json({
@@ -145,6 +182,7 @@ async function getOrders(req, res) {
       shipping_status,
       product_id,
       product_sku,
+      phone,
     });
 
     const appliedFilters = {
@@ -152,11 +190,13 @@ async function getOrders(req, res) {
       to: to.toISOString(),
       status,
       employeeId,
+      employee_id: employeeId,
       order_source,
       order_type,
       shipping_status,
       product_id,
       product_sku,
+      phone,
       page,
       limit,
     };
@@ -165,11 +205,13 @@ async function getOrders(req, res) {
       success: true,
       appliedRequest: {
         method: "GET",
-        url: publicRequestUrl(req),
+        url: buildCanonicalOrdersListUrl(req),
+        originalUrl: publicRequestUrl(req),
+        queryReceived: shallowQueryEcho(req),
       },
       appliedFilters,
       listOrdersQueryReference:
-        "GET /api/orders?from=ISO8601&to=ISO8601&status=&employeeId|employee_id= (uuid الموظف أو إيميله)&order_source=&order_type=&shipping_status=&product_id|productId=&product_sku|productSku=&page=&limit=",
+        "GET /api/orders?...&phone|mobile|customerPhone|customer_phone= — بحث جزئي داخل raw_data (يشمل phone و mobile وغيرهما). employeeId أو employee_id: uuid أو إيميل. بدون موظف: from/to على created_at. مع موظف: from/to على order_status_logs.changed_at.",
       ...result,
     });
   } catch (error) {

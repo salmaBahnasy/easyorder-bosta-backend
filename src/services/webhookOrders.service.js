@@ -140,6 +140,47 @@ async function resolveEmployeeToIdForLogs(employeeFilter) {
   return row?.id != null ? String(row.id) : null;
 }
 
+const LOG_SELECT_PAGE_SIZE = 1000;
+
+/**
+ * يجمع order_id مميزة من order_status_logs حيث changed_by = الموظف.
+ * الفترة from/to تُطبَّق على changed_at (وقت تغيير الحالة)، مع جلب كل الصفوف (تجاوز حد الـ 1000 الافتراضي).
+ */
+async function fetchDistinctOrderIdsFromLogs({ changedByKey, from, to }) {
+  const ids = new Set();
+  let offset = 0;
+
+  for (;;) {
+    let q = supabase
+      .from(ORDER_STATUS_LOGS_TABLE)
+      .select("order_id")
+      .eq("changed_by", changedByKey)
+      .order("changed_at", { ascending: true });
+
+    if (from) q = q.gte("changed_at", from.toISOString());
+    if (to) q = q.lte("changed_at", to.toISOString());
+
+    q = q.range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+
+    const { data, error } = await q;
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      if (row.order_id != null && String(row.order_id).trim() !== "") {
+        ids.add(String(row.order_id).trim());
+      }
+    }
+
+    if (data.length < LOG_SELECT_PAGE_SIZE) break;
+    offset += LOG_SELECT_PAGE_SIZE;
+  }
+
+  return [...ids];
+}
+
 async function insertOrderStatusLog({
   orderId,
   oldStatus,
@@ -228,10 +269,13 @@ async function getWebhookOrders({
   shipping_status,
   product_id,
   product_sku,
+  phone,
 }) {
   const fromIndex = (page - 1) * limit;
   const toIndex = fromIndex + limit - 1;
   let orderIdsByEmployee = null;
+  /** عند فلتر الموظف: لا نفلتر orders.created_at (الفترة تُطبَّق على سجلات النشاط فقط). */
+  let skipOrderCreatedAtRange = false;
 
   if (employeeId) {
     const changedByKey = await resolveEmployeeToIdForLogs(employeeId);
@@ -247,16 +291,12 @@ async function getWebhookOrders({
 
     const keyForLogs = changedByKey || String(employeeId).trim();
 
-    const { data: logs, error: logsError } = await supabase
-      .from(ORDER_STATUS_LOGS_TABLE)
-      .select("order_id")
-      .eq("changed_by", keyForLogs);
-
-    if (logsError) {
-      throw new Error(logsError.message);
-    }
-
-    orderIdsByEmployee = [...new Set((logs || []).map((x) => x.order_id))];
+    orderIdsByEmployee = await fetchDistinctOrderIdsFromLogs({
+      changedByKey: keyForLogs,
+      from,
+      to,
+    });
+    skipOrderCreatedAtRange = true;
 
     if (!orderIdsByEmployee.length) {
       return {
@@ -275,8 +315,12 @@ async function getWebhookOrders({
     .order("created_at", { ascending: false })
     .range(fromIndex, toIndex);
 
-  if (from) query = query.gte("created_at", from.toISOString());
-  if (to) query = query.lte("created_at", to.toISOString());
+  if (from && !skipOrderCreatedAtRange) {
+    query = query.gte("created_at", from.toISOString());
+  }
+  if (to && !skipOrderCreatedAtRange) {
+    query = query.lte("created_at", to.toISOString());
+  }
   if (status) query = query.eq("status", status);
 
   const rawContains = {};
@@ -291,17 +335,18 @@ async function getWebhookOrders({
 
   const pidNeedle = parseProductFilterInput(product_id);
   const skuNeedle = parseProductFilterInput(product_sku);
+  const phoneNeedle = parseProductFilterInput(phone);
   const jsonTextCol = '"raw_data"::text';
 
-  if (pidNeedle && skuNeedle) {
-    query = query.ilikeAllOf(jsonTextCol, [
-      `%${pidNeedle}%`,
-      `%${skuNeedle}%`,
-    ]);
-  } else if (pidNeedle) {
-    query = query.ilike(jsonTextCol, `%${pidNeedle}%`);
-  } else if (skuNeedle) {
-    query = query.ilike(jsonTextCol, `%${skuNeedle}%`);
+  const textPatterns = [];
+  if (pidNeedle) textPatterns.push(`%${pidNeedle}%`);
+  if (skuNeedle) textPatterns.push(`%${skuNeedle}%`);
+  if (phoneNeedle) textPatterns.push(`%${phoneNeedle}%`);
+
+  if (textPatterns.length === 1) {
+    query = query.ilike(jsonTextCol, textPatterns[0]);
+  } else if (textPatterns.length > 1) {
+    query = query.ilikeAllOf(jsonTextCol, textPatterns);
   }
 
   const { data, count, error } = await query;
@@ -531,12 +576,14 @@ function chunkArray(arr, size) {
 }
 
 /**
- * Order counts by status. Optional employeeId = only orders that appear in
- * order_status_logs for that employee (same semantics as GET /api/orders?employeeId=).
- * Optional from/to filter on orders.created_at (inclusive).
+ * Order counts by status. Optional employeeId = orders that appear in
+ * order_status_logs for that employee, with from/to applied to logs.changed_at
+ * (same semantics as GET /api/orders?employeeId=). Without employeeId, from/to
+ * apply to orders.created_at.
  */
 async function getOrdersStatistics({ employeeId, from, to }) {
   let orderIds = null;
+  let filterOrdersByCreatedAtInRange = true;
 
   const employeeKey =
     typeof employeeId === "string" ? employeeId.trim() : employeeId;
@@ -558,16 +605,12 @@ async function getOrdersStatistics({ employeeId, from, to }) {
 
     const keyForLogs = changedByKey || String(employeeKey);
 
-    const { data: logs, error: logsError } = await supabase
-      .from(ORDER_STATUS_LOGS_TABLE)
-      .select("order_id")
-      .eq("changed_by", keyForLogs);
-
-    if (logsError) {
-      throw new Error(logsError.message);
-    }
-
-    orderIds = [...new Set((logs || []).map((r) => r.order_id).filter(Boolean))];
+    orderIds = await fetchDistinctOrderIdsFromLogs({
+      changedByKey: keyForLogs,
+      from,
+      to,
+    });
+    filterOrdersByCreatedAtInRange = false;
 
     if (!orderIds.length) {
       return {
@@ -594,8 +637,12 @@ async function getOrdersStatistics({ employeeId, from, to }) {
         .select("*", { count: "exact", head: true });
 
       if (chunk) q = q.in("order_id", chunk);
-      if (from) q = q.gte("created_at", from.toISOString());
-      if (to) q = q.lte("created_at", to.toISOString());
+      if (from && filterOrdersByCreatedAtInRange) {
+        q = q.gte("created_at", from.toISOString());
+      }
+      if (to && filterOrdersByCreatedAtInRange) {
+        q = q.lte("created_at", to.toISOString());
+      }
       if (status) q = q.eq("status", status);
 
       const { count, error } = await q;
@@ -617,8 +664,12 @@ async function getOrdersStatistics({ employeeId, from, to }) {
       .select("*", { count: "exact", head: true });
 
     if (chunk) q = q.in("order_id", chunk);
-    if (from) q = q.gte("created_at", from.toISOString());
-    if (to) q = q.lte("created_at", to.toISOString());
+    if (from && filterOrdersByCreatedAtInRange) {
+      q = q.gte("created_at", from.toISOString());
+    }
+    if (to && filterOrdersByCreatedAtInRange) {
+      q = q.lte("created_at", to.toISOString());
+    }
 
     const { count, error } = await q;
     if (error) throw new Error(error.message);
