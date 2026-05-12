@@ -7,8 +7,50 @@ const {
   editOrder,
   getOrdersStatistics,
   ALLOWED_ORDER_STATUSES,
+  ORDER_SOURCES,
+  ORDER_TYPES,
+  SHIPPING_STATUSES,
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
+
+/** مثال لجسم POST /api/orders (إنشاء يدوي — ليس من الويب هوك) */
+const POST_ORDER_MANUAL_EXAMPLE = {
+  id: "12345",
+  full_name: "اسم العميل",
+  phone: "01000000000",
+  address: "العنوان",
+  city: "القاهرة",
+  order_source: "whatsapp",
+  order_type: "new",
+  shipping_status: "in_progress",
+  cart_items: [
+    {
+      product_id: 101,
+      quantity: 1,
+      product: { name: "منتج", sku: "SKU-001" },
+    },
+  ],
+};
+
+function publicRequestUrl(req) {
+  const host = req.get("x-forwarded-host") || req.get("host") || "localhost";
+  const proto = req.get("x-forwarded-proto") || req.protocol || "http";
+  return `${proto}://${host}${req.originalUrl}`;
+}
+
+function postOrdersAbsoluteUrl(req) {
+  const host = req.get("x-forwarded-host") || req.get("host") || "localhost";
+  const proto = req.get("x-forwarded-proto") || req.protocol || "http";
+  return `${proto}://${host}/api/orders`;
+}
+
+/** معامل استعلام فارغ أو مسافات فقط = لا فلتر (undefined) */
+function optionalQueryParam(value) {
+  if (value == null) return undefined;
+  const raw = Array.isArray(value) ? value[0] : value;
+  const s = String(raw).trim();
+  return s === "" ? undefined : s;
+}
 
 function getDefaultDateRange() {
   const now = new Date();
@@ -32,14 +74,61 @@ async function getOrders(req, res) {
     const from = req.query.from ? new Date(req.query.from) : defaultRange.from;
     const to = req.query.to ? new Date(req.query.to) : defaultRange.to;
 
-    const status = req.query.status;
-    const employeeId = req.query.employeeId;
+    const status = optionalQueryParam(req.query.status);
+    const employeeId = optionalQueryParam(
+      req.query.employeeId || req.query.employee_id || req.query.userId,
+    );
+    const order_source = optionalQueryParam(
+      req.query.order_source || req.query.orderSource,
+    );
+    const order_type = optionalQueryParam(
+      req.query.order_type || req.query.orderType,
+    );
+    const shipping_status = optionalQueryParam(
+      req.query.shipping_status || req.query.shippingStatus,
+    );
+    const product_id = optionalQueryParam(
+      req.query.product_id || req.query.productId,
+    );
+    const product_sku = optionalQueryParam(
+      req.query.product_sku || req.query.productSku,
+    );
 
     if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
       res.status(400).json({
         success: false,
         message: "Invalid status filter",
         allowedStatuses: ALLOWED_ORDER_STATUSES,
+      });
+      return;
+    }
+
+    if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid order_source filter",
+        allowedOrderSources: ORDER_SOURCES,
+      });
+      return;
+    }
+
+    if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid order_type filter",
+        allowedOrderTypes: ORDER_TYPES,
+      });
+      return;
+    }
+
+    if (
+      shipping_status &&
+      !SHIPPING_STATUSES.includes(String(shipping_status).trim())
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid shipping_status filter",
+        allowedShippingStatuses: SHIPPING_STATUSES,
       });
       return;
     }
@@ -51,10 +140,36 @@ async function getOrders(req, res) {
       to,
       status,
       employeeId,
+      order_source,
+      order_type,
+      shipping_status,
+      product_id,
+      product_sku,
     });
+
+    const appliedFilters = {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      status,
+      employeeId,
+      order_source,
+      order_type,
+      shipping_status,
+      product_id,
+      product_sku,
+      page,
+      limit,
+    };
 
     res.json({
       success: true,
+      appliedRequest: {
+        method: "GET",
+        url: publicRequestUrl(req),
+      },
+      appliedFilters,
+      listOrdersQueryReference:
+        "GET /api/orders?from=ISO8601&to=ISO8601&status=&employeeId|employee_id=&order_source=&order_type=&shipping_status=&product_id|productId=&product_sku|productSku=&page=&limit=",
       ...result,
     });
   } catch (error) {
@@ -132,14 +247,39 @@ async function createOrder(req, res) {
       return;
     }
 
-    const createdOrder = await addWebhookOrder(req.body);
+    const createdOrder = await addWebhookOrder(req.body, { fromWebhook: false });
 
     res.status(201).json({
       success: true,
       message: "Order created successfully",
+      appliedRequest: {
+        method: "POST",
+        url: postOrdersAbsoluteUrl(req),
+        headers: { "Content-Type": "application/json" },
+        notes: {
+          ar: "إنشاء يدوي: order_source إلزامي. من الويب هوك يُستخدم POST /webhooks/easyorders/order-created ويُضبط المصدر تلقائياً على المتجر.",
+          manualRequiredFields: ["order_source"],
+          manualOptionalMeta: ["order_type", "shipping_status"],
+          allowedOrderSources: ORDER_SOURCES,
+          allowedOrderTypes: ORDER_TYPES,
+          allowedShippingStatuses: SHIPPING_STATUSES,
+        },
+      },
+      createOrderBodyExample: POST_ORDER_MANUAL_EXAMPLE,
       data: createdOrder,
     });
   } catch (error) {
+    if (error.code === "INVALID_ORDER_META") {
+      res.status(400).json({
+        success: false,
+        message: error.message,
+        allowedOrderSources: ORDER_SOURCES,
+        allowedOrderTypes: ORDER_TYPES,
+        allowedShippingStatuses: SHIPPING_STATUSES,
+      });
+      return;
+    }
+
     res.status(500).json({
       success: false,
       message: "Failed to create order",
@@ -199,6 +339,17 @@ async function updateOrder(req, res) {
       res.status(401).json({
         success: false,
         message: "Unauthorized",
+      });
+      return;
+    }
+
+    if (error.code === "INVALID_ORDER_META") {
+      res.status(400).json({
+        success: false,
+        message: error.message,
+        allowedOrderSources: ORDER_SOURCES,
+        allowedOrderTypes: ORDER_TYPES,
+        allowedShippingStatuses: SHIPPING_STATUSES,
       });
       return;
     }

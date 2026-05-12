@@ -132,6 +132,16 @@ function toPresentation(payload) {
     Array.isArray(cartLines) ? cartLines : [],
   );
 
+  const orderSource = firstNonEmptyString(
+    payload.order_source,
+    order.order_source,
+  );
+  const orderType = firstNonEmptyString(payload.order_type, order.order_type);
+  const shippingStatus = firstNonEmptyString(
+    payload.shipping_status,
+    order.shipping_status,
+  );
+
   return {
     id: order.id,
     shortId: order.short_id,
@@ -174,6 +184,11 @@ function toPresentation(payload) {
     tracking: formatTracking(order.metadata),
     storeId: order.store_id,
     guestId: order.guest_id,
+    orderMeta: {
+      orderSource: orderSource || null,
+      orderType: orderType || null,
+      shippingStatus: shippingStatus || null,
+    },
   };
 }
 

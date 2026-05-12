@@ -12,6 +12,96 @@ const ALLOWED_ORDER_STATUSES = [
   "Shipped",
 ];
 
+/** مصدر الطلب: store=المتجر (تلقائي من الويب هوك), messenger, whatsapp, lost_order=طلب مفقود */
+const ORDER_SOURCES = ["store", "messenger", "whatsapp", "lost_order"];
+
+/** نوع الطلب: new=جديد (افتراضي), replacement=استبدال, return=استرجاع */
+const ORDER_TYPES = ["new", "replacement", "return"];
+
+/** حالة الشحن: in_progress=قيد التنفيذ, delivered=تم بنجاح, failed=فشل التوصيل */
+const SHIPPING_STATUSES = ["in_progress", "delivered", "failed"];
+
+function pickMetaField(payload, snakeKey, camelKey) {
+  if (!payload || typeof payload !== "object") return undefined;
+  if (Object.prototype.hasOwnProperty.call(payload, snakeKey)) {
+    return payload[snakeKey];
+  }
+  if (camelKey && Object.prototype.hasOwnProperty.call(payload, camelKey)) {
+    return payload[camelKey];
+  }
+  return undefined;
+}
+
+function normalizeMetaString(value) {
+  if (value == null) return "";
+  return String(value).trim();
+}
+
+/** يزيل أحرف تكسر LIKE أو ilike(all) في PostgREST */
+function sanitizeIlikeNeedle(value) {
+  const s = String(value).trim().slice(0, 200);
+  if (!s) return "";
+  return s.replace(/[%_\\,(){}]/g, "");
+}
+
+/** قيمة آمنة للبحث؛ إن أصبحت فارغة بعد التنقية يُهمَل الفلتر (لا 400). */
+function parseProductFilterInput(raw) {
+  if (raw == null || String(raw).trim() === "") return "";
+  const s = sanitizeIlikeNeedle(raw);
+  return s || "";
+}
+
+/**
+ * @param {object} payload - جسم الطلب (ويب هوك أو إنشاء يدوي)
+ * @param {{ fromWebhook?: boolean }} options - من الويب هوك: مصدر المتجر إلزاميًا
+ */
+function resolveOrderMeta(payload, options = {}) {
+  const fromWebhook = Boolean(options.fromWebhook);
+
+  let order_source = normalizeMetaString(
+    pickMetaField(payload, "order_source", "orderSource"),
+  );
+  let order_type = normalizeMetaString(
+    pickMetaField(payload, "order_type", "orderType"),
+  );
+  let shipping_status = normalizeMetaString(
+    pickMetaField(payload, "shipping_status", "shippingStatus"),
+  );
+
+  if (fromWebhook) {
+    order_source = "store";
+  } else {
+    if (!order_source) {
+      const err = new Error(
+        "order_source is required (store | messenger | whatsapp | lost_order)",
+      );
+      err.code = "INVALID_ORDER_META";
+      throw err;
+    }
+    if (!ORDER_SOURCES.includes(order_source)) {
+      const err = new Error("Invalid order_source");
+      err.code = "INVALID_ORDER_META";
+      throw err;
+    }
+  }
+
+  if (!order_type) order_type = "new";
+  if (!ORDER_TYPES.includes(order_type)) {
+    const err = new Error("Invalid order_type");
+    err.code = "INVALID_ORDER_META";
+    throw err;
+  }
+
+  if (!shipping_status) shipping_status = "in_progress";
+  if (!SHIPPING_STATUSES.includes(shipping_status)) {
+    const err = new Error("Invalid shipping_status");
+    err.code = "INVALID_ORDER_META";
+    throw err;
+  }
+
+  return { order_source, order_type, shipping_status };
+}
+
 const ORDERS_TABLE = process.env.SUPABASE_ORDERS_TABLE || "orders";
 const ORDER_STATUS_LOGS_TABLE =
   process.env.SUPABASE_ORDER_STATUS_LOGS_TABLE || "order_status_logs";
@@ -59,12 +149,18 @@ function resolveSourceOrderId(order) {
   return `webhook-${fingerprint}`;
 }
 
-async function addWebhookOrder(order) {
+async function addWebhookOrder(order, options = {}) {
   const sourceOrderId = resolveSourceOrderId(order);
+  const meta = resolveOrderMeta(order, { fromWebhook: options.fromWebhook });
+  const raw_data = {
+    ...(order && typeof order === "object" && !Array.isArray(order) ? order : {}),
+    ...meta,
+  };
+
   const payload = {
     order_id: sourceOrderId,
     status: "new",
-    raw_data: order,
+    raw_data,
     created_at: new Date().toISOString(),
   };
 
@@ -93,6 +189,11 @@ async function getWebhookOrders({
   to,
   status,
   employeeId,
+  order_source,
+  order_type,
+  shipping_status,
+  product_id,
+  product_sku,
 }) {
   const fromIndex = (page - 1) * limit;
   const toIndex = fromIndex + limit - 1;
@@ -130,7 +231,31 @@ async function getWebhookOrders({
   if (from) query = query.gte("created_at", from.toISOString());
   if (to) query = query.lte("created_at", to.toISOString());
   if (status) query = query.eq("status", status);
+
+  const rawContains = {};
+  if (order_source) rawContains.order_source = order_source;
+  if (order_type) rawContains.order_type = order_type;
+  if (shipping_status) rawContains.shipping_status = shipping_status;
+  if (Object.keys(rawContains).length) {
+    query = query.contains("raw_data", rawContains);
+  }
+
   if (orderIdsByEmployee) query = query.in("order_id", orderIdsByEmployee);
+
+  const pidNeedle = parseProductFilterInput(product_id);
+  const skuNeedle = parseProductFilterInput(product_sku);
+  const jsonTextCol = '"raw_data"::text';
+
+  if (pidNeedle && skuNeedle) {
+    query = query.ilikeAllOf(jsonTextCol, [
+      `%${pidNeedle}%`,
+      `%${skuNeedle}%`,
+    ]);
+  } else if (pidNeedle) {
+    query = query.ilike(jsonTextCol, `%${pidNeedle}%`);
+  } else if (skuNeedle) {
+    query = query.ilike(jsonTextCol, `%${skuNeedle}%`);
+  }
 
   const { data, count, error } = await query;
 
@@ -263,6 +388,43 @@ async function editOrder(orderId, updates, changedBy) {
   }
   if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "phone")) {
     normalizedIncomingUpdates.mobile = normalizedIncomingUpdates.phone;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "orderSource")) {
+    normalizedIncomingUpdates.order_source = normalizedIncomingUpdates.orderSource;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "orderType")) {
+    normalizedIncomingUpdates.order_type = normalizedIncomingUpdates.orderType;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "shippingStatus")) {
+    normalizedIncomingUpdates.shipping_status = normalizedIncomingUpdates.shippingStatus;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "order_source")) {
+    const v = normalizeMetaString(normalizedIncomingUpdates.order_source);
+    if (!ORDER_SOURCES.includes(v)) {
+      const invalidStatusError = new Error("Invalid order_source");
+      invalidStatusError.code = "INVALID_ORDER_META";
+      throw invalidStatusError;
+    }
+    normalizedIncomingUpdates.order_source = v;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "order_type")) {
+    const v = normalizeMetaString(normalizedIncomingUpdates.order_type);
+    if (!ORDER_TYPES.includes(v)) {
+      const invalidStatusError = new Error("Invalid order_type");
+      invalidStatusError.code = "INVALID_ORDER_META";
+      throw invalidStatusError;
+    }
+    normalizedIncomingUpdates.order_type = v;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "shipping_status")) {
+    const v = normalizeMetaString(normalizedIncomingUpdates.shipping_status);
+    if (!SHIPPING_STATUSES.includes(v)) {
+      const invalidStatusError = new Error("Invalid shipping_status");
+      invalidStatusError.code = "INVALID_ORDER_META";
+      throw invalidStatusError;
+    }
+    normalizedIncomingUpdates.shipping_status = v;
   }
 
   const mergedRawData = {
@@ -419,4 +581,7 @@ module.exports = {
   editOrder,
   getOrdersStatistics,
   ALLOWED_ORDER_STATUSES,
+  ORDER_SOURCES,
+  ORDER_TYPES,
+  SHIPPING_STATUSES,
 };

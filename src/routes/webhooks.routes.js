@@ -11,7 +11,7 @@ const {
 
 router.post("/easyorders/order-created", async (req, res) => {
   try {
-    const savedOrder = await addWebhookOrder(req.body);
+    const savedOrder = await addWebhookOrder(req.body, { fromWebhook: true });
 
     res.status(200).json({
       success: true,
