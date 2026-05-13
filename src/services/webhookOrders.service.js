@@ -104,7 +104,9 @@ function parseProductFilterInput(raw) {
 
 /**
  * @param {object} payload - جسم الطلب (ويب هوك أو إنشاء يدوي)
- * @param {{ fromWebhook?: boolean }} options - من الويب هوك: مصدر المتجر إلزاميًا
+ * @param {{ fromWebhook?: boolean }} options - من الويب هوك: المصدر دائمًا متجر.
+ *   إنشاء يدوي: إن لم يُرسل المصدر يُفترض `store`؛ النوع يُفترض `new`؛ الشحن `in_progress`.
+ *   لا يُحدَّث صف قديم في DB تلقائياً؛ القيم تُكتب عند الإنشاء أو عند upsert/تحديث يدوي لهذا الطلب.
  */
 function resolveOrderMeta(payload, options = {}) {
   const fromWebhook = Boolean(options.fromWebhook);
@@ -123,11 +125,7 @@ function resolveOrderMeta(payload, options = {}) {
     order_source = "store";
   } else {
     if (!order_source) {
-      const err = new Error(
-        "order_source is required (store | messenger | whatsapp | lost_order)",
-      );
-      err.code = "INVALID_ORDER_META";
-      throw err;
+      order_source = "store";
     }
     if (!ORDER_SOURCES.includes(order_source)) {
       const err = new Error("Invalid order_source");
@@ -439,6 +437,10 @@ async function addWebhookOrder(order, options = {}) {
     ...meta,
   };
 
+  raw_data.orderSource = raw_data.order_source;
+  raw_data.orderType = raw_data.order_type;
+  raw_data.shippingStatus = raw_data.shipping_status;
+
   if (actor?.id != null) {
     const idStr = String(actor.id).trim();
     if (idStr) {
@@ -495,18 +497,36 @@ function applyRawDataShippingStatusContainsOr(query, shippingValue) {
   );
 }
 
+function applyRawDataOrderSourceContainsOr(query, sourceValue) {
+  const v = String(sourceValue || "").trim();
+  if (!v) return query;
+  const e = escapePostgrestJsonStringForCsFragment(v);
+  return query.or(
+    `raw_data.cs.{"order_source":"${e}"},raw_data.cs.{"orderSource":"${e}"}`,
+  );
+}
+
+function applyRawDataOrderTypeContainsOr(query, typeValue) {
+  const v = String(typeValue || "").trim();
+  if (!v) return query;
+  const e = escapePostgrestJsonStringForCsFragment(v);
+  return query.or(
+    `raw_data.cs.{"order_type":"${e}"},raw_data.cs.{"orderType":"${e}"}`,
+  );
+}
+
 function applyRawDataMetaContains(query, { order_source, order_type, shipping_status }) {
   let q = query;
-  const rawContains = {};
-  if (order_source) rawContains.order_source = order_source;
-  if (order_type) rawContains.order_type = order_type;
-  if (Object.keys(rawContains).length) {
-    q = q.contains("raw_data", rawContains);
+  if (order_source) {
+    q = applyRawDataOrderSourceContainsOr(q, order_source);
+  }
+  if (order_type) {
+    q = applyRawDataOrderTypeContainsOr(q, order_type);
   }
   if (shipping_status) {
     q = applyRawDataShippingStatusContainsOr(q, shipping_status);
   }
-  if (!Object.keys(rawContains).length && !shipping_status) return query;
+  if (!order_source && !order_type && !shipping_status) return query;
   return q;
 }
 
@@ -1126,10 +1146,10 @@ async function getOrdersStatistics({
         : shipping_status || null;
 
     if (effectiveOrderSource) {
-      q = q.contains("raw_data", { order_source: effectiveOrderSource });
+      q = applyRawDataOrderSourceContainsOr(q, effectiveOrderSource);
     }
     if (effectiveOrderType) {
-      q = q.contains("raw_data", { order_type: effectiveOrderType });
+      q = applyRawDataOrderTypeContainsOr(q, effectiveOrderType);
     }
     if (effectiveShipping) {
       q = applyRawDataShippingStatusContainsOr(q, effectiveShipping);

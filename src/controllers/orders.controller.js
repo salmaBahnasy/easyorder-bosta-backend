@@ -14,16 +14,13 @@ const {
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
 
-/** مثال لجسم POST /api/orders (إنشاء يدوي — ليس من الويب هوك) */
+/** مثال لجسم POST /api/orders — الحقول الاختيارية: order_source (افتراضي store)، order_type (افتراضي new)، shipping_status (افتراضي in_progress). حالة الصف orders.status = new. */
 const POST_ORDER_MANUAL_EXAMPLE = {
   id: "12345",
   full_name: "اسم العميل",
   phone: "01000000000",
   address: "العنوان",
   city: "القاهرة",
-  order_source: "whatsapp",
-  order_type: "new",
-  shipping_status: "in_progress",
   cart_items: [
     {
       product_id: 101,
@@ -321,9 +318,13 @@ async function createOrder(req, res) {
         url: postOrdersAbsoluteUrl(req),
         headers: { "Content-Type": "application/json" },
         notes: {
-          ar: "إنشاء يدوي: order_source إلزامي. من الويب هوك يُستخدم POST /webhooks/easyorders/order-created ويُضبط المصدر تلقائياً على المتجر. إرسال Authorization: Bearer يملأ created_by_employee_id و user_email في raw_data.",
-          manualRequiredFields: ["order_source"],
-          manualOptionalMeta: ["order_type", "shipping_status"],
+          ar: "إنشاء يدوي: افتراضيًا مصدر الطلب متجر (store)، النوع جديد (new)، الشحن قيد التنفيذ (in_progress)، وحالة السجل في النظام new. يمكن تجاوزها بإرسال order_source / order_type / shipping_status. من الويب هوك: POST /webhooks/easyorders/order-created يضبط المصدر متجرًا. إرسال Authorization: Bearer يملأ created_by_employee_id و user_email في raw_data.",
+          manualRequiredFields: [],
+          manualOptionalMeta: [
+            "order_source",
+            "order_type",
+            "shipping_status",
+          ],
           allowedOrderSources: ORDER_SOURCES,
           allowedOrderTypes: ORDER_TYPES,
           allowedShippingStatuses: SHIPPING_STATUSES,
