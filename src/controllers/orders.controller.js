@@ -226,7 +226,7 @@ async function getOrders(req, res) {
       },
       appliedFilters,
       listOrdersQueryReference:
-        "GET /api/orders?... phone|mobile|customer_phone — بحث في raw_data. employeeId|employee_id (uuid أو إيميل). employee_scope=all|any|all_time — مع موظف: تجاهل from/to على سجلات النشاط وجلب كل الطلبات التي غيّرها الموظف. بدون employee_scope: from/to على order_status_logs.changed_at. بدون موظف: from/to على orders.created_at. product_id أو easyorder_id (UUID): مطابقة العربة بـ @> بدون sku.",
+        "GET /api/orders?... phone|mobile|customer_phone filters raw_data. employeeId|employee_id (UUID or email). employee_scope=all|any|all_time: with employee, from/to apply to activity logs only. Without employee_scope: from/to on order_status_logs.changed_at. Without employee: from/to on orders.created_at. product_id or easyorder_id (UUID): cart match via @> (no SKU required).",
       ...result,
     });
   } catch (error) {
@@ -637,7 +637,8 @@ async function getOrdersStats(req, res) {
 }
 
 /**
- * GET /api/orders/analytics — تقرير تجميعي: منتج (مطلوب) + موظف + فترة created_at اختيارية.
+ * GET /api/orders/analytics — aggregated report: required product (UUID), optional
+ * employee, optional created_at range.
  */
 async function getOrdersAnalytics(req, res) {
   try {
@@ -725,13 +726,6 @@ async function getOrdersAnalytics(req, res) {
         averageUnitsPerOrder: report.averageUnitsPerOrder,
         averageOrderValue: report.averageOrderValue,
       },
-      summaryAr: {
-        "اجمالي_المبيعات_total_cost": report.totalCost,
-        "اجمالي_الطلبات": report.totalOrders,
-        "اجمالي_وحدات_المنتجات_في_العربة": report.totalProductUnits,
-        "نسبية_المبيعات_متوسط_الكمية_لكل_طلب": report.averageUnitsPerOrder,
-        "سعر_الطلب_متوسط_قيمة_الطلب": report.averageOrderValue,
-      },
       byOrderSource: report.byOrderSource,
       byOrderType: report.byOrderType,
       byOrderStatus: report.byOrderStatus,
@@ -740,7 +734,7 @@ async function getOrdersAnalytics(req, res) {
         truncated: report.truncated,
         maxRowsCap: report.maxRowsCap,
         note:
-          "Buckets use key __unset when value missing in raw_data or status.",
+          "Bucket key __unset is used when a value is missing in raw_data or status.",
       },
     });
   } catch (error) {

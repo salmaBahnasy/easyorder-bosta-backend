@@ -950,11 +950,56 @@ function applyOrderIdMembershipFilter(query, orderIds) {
   return query.or(orParts.join(","));
 }
 
+function buildEmptyStatsBreakdownResponse() {
+  const byOrderSource = Object.fromEntries(ORDER_SOURCES.map((s) => [s, 0]));
+  const byOrderType = Object.fromEntries(ORDER_TYPES.map((t) => [t, 0]));
+  const byShippingStatus = Object.fromEntries(
+    SHIPPING_STATUSES.map((s) => [s, 0]),
+  );
+  const byOrderStatus = {
+    canceled: 0,
+    no_replay: 0,
+    follow_up: 0,
+    repeater: 0,
+    Confirmed: 0,
+    Shipped: 0,
+    new: 0,
+    newOrders: 0,
+    confirmedOrders: 0,
+    shippedOrders: 0,
+    canceledOrders: 0,
+    noReplyOrders: 0,
+    followUpOrders: 0,
+    repeaterOrders: 0,
+  };
+  return {
+    totalOrders: 0,
+    canceled: 0,
+    no_replay: 0,
+    follow_up: 0,
+    repeater: 0,
+    Confirmed: 0,
+    Shipped: 0,
+    new: 0,
+    newOrders: 0,
+    confirmedOrders: 0,
+    shippedOrders: 0,
+    canceledOrders: 0,
+    noReplyOrders: 0,
+    followUpOrders: 0,
+    repeaterOrders: 0,
+    byOrderStatus,
+    byOrderSource,
+    byOrderType,
+    byShippingStatus,
+  };
+}
+
 /**
- * عدّ الطلبات حسب orders.status مع نفس فلاتر القائمة (موظف، مصدر، نوع، شحن، منتج، حالة).
- * employeeId: لوجات + علامات raw_data كما في getWebhookOrders.
- * status: يقيّد الكون إلى طلبات بهذه الحالة فقط (باقي مفاتيح الإحصاء = 0).
- * from/to: على orders.created_at إلا مع موظف بدون employee_scope حيث تُطبَّق على اللوجات فقط لحساب مجموعة order_id.
+ * Order counts by orders.status with the same filters as the list (employee, meta,
+ * product, optional status). employeeId uses logs + raw_data markers like getWebhookOrders.
+ * status filter narrows the universe; other status buckets are zero.
+ * from/to on orders.created_at unless employee resolution uses log dates only for the id set.
  */
 async function getOrdersStatistics({
   employeeId,
@@ -977,16 +1022,7 @@ async function getOrdersStatistics({
   if (employeeKey) {
     const changedByKey = await resolveEmployeeToIdForLogs(employeeKey);
     if (String(employeeKey).includes("@") && !changedByKey) {
-      return {
-        totalOrders: 0,
-        canceled: 0,
-        no_replay: 0,
-        follow_up: 0,
-        repeater: 0,
-        Confirmed: 0,
-        Shipped: 0,
-        new: 0,
-      };
+      return buildEmptyStatsBreakdownResponse();
     }
 
     const keyForLogs = changedByKey || String(employeeKey);
@@ -1005,16 +1041,7 @@ async function getOrdersStatistics({
     filterOrdersByCreatedAtInRange = false;
 
     if (!orderIds.length) {
-      return {
-        totalOrders: 0,
-        canceled: 0,
-        no_replay: 0,
-        follow_up: 0,
-        repeater: 0,
-        Confirmed: 0,
-        Shipped: 0,
-        new: 0,
-      };
+      return buildEmptyStatsBreakdownResponse();
     }
   }
 
@@ -1025,6 +1052,54 @@ async function getOrdersStatistics({
     listStatusFilter != null && String(listStatusFilter).trim() !== ""
       ? String(listStatusFilter).trim()
       : null;
+
+  function applyStatsRawContains(query, breakdownDim, breakdownValue) {
+    const rawContains = {};
+    if (breakdownDim === "order_source") {
+      rawContains.order_source = breakdownValue;
+    } else if (order_source) {
+      rawContains.order_source = order_source;
+    }
+    if (breakdownDim === "order_type") {
+      rawContains.order_type = breakdownValue;
+    } else if (order_type) {
+      rawContains.order_type = order_type;
+    }
+    if (breakdownDim === "shipping_status") {
+      rawContains.shipping_status = breakdownValue;
+    } else if (shipping_status) {
+      rawContains.shipping_status = shipping_status;
+    }
+    if (!Object.keys(rawContains).length) return query;
+    return query.contains("raw_data", rawContains);
+  }
+
+  async function countAggregatedOrders(breakdownDim, breakdownValue) {
+    let sum = 0;
+    for (const chunk of chunks) {
+      let q = supabase
+        .from(ORDERS_TABLE)
+        .select("*", { count: "exact", head: true });
+
+      if (chunk) q = q.in("order_id", chunk);
+      if (from && filterOrdersByCreatedAtInRange) {
+        q = q.gte("created_at", from.toISOString());
+      }
+      if (to && filterOrdersByCreatedAtInRange) {
+        q = q.lte("created_at", to.toISOString());
+      }
+      q = applyStatsRawContains(q, breakdownDim, breakdownValue);
+      q = applyProductCartIlikeFilters(q, { product_id, product_sku });
+      if (listStatusFilterNorm != null) {
+        q = q.eq("status", listStatusFilterNorm);
+      }
+
+      const { count, error } = await q;
+      if (error) throw new Error(error.message);
+      sum += count || 0;
+    }
+    return sum;
+  }
 
   async function countWithChunks(dbStatusForKey) {
     if (
@@ -1047,11 +1122,7 @@ async function getOrdersStatistics({
       if (to && filterOrdersByCreatedAtInRange) {
         q = q.lte("created_at", to.toISOString());
       }
-      q = applyRawDataMetaContains(q, {
-        order_source,
-        order_type,
-        shipping_status,
-      });
+      q = applyStatsRawContains(q, null, null);
       q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       q = q.eq("status", dbStatusForKey);
 
@@ -1080,11 +1151,7 @@ async function getOrdersStatistics({
     if (to && filterOrdersByCreatedAtInRange) {
       q = q.lte("created_at", to.toISOString());
     }
-    q = applyRawDataMetaContains(q, {
-      order_source,
-      order_type,
-      shipping_status,
-    });
+    q = applyStatsRawContains(q, null, null);
     q = applyProductCartIlikeFilters(q, { product_id, product_sku });
     if (listStatusFilterNorm != null) {
       q = q.eq("status", listStatusFilterNorm);
@@ -1095,6 +1162,41 @@ async function getOrdersStatistics({
     totalOrders += count || 0;
   }
 
+  const byOrderSource = {};
+  for (const src of ORDER_SOURCES) {
+    byOrderSource[src] = await countAggregatedOrders("order_source", src);
+  }
+
+  const byOrderType = {};
+  for (const typ of ORDER_TYPES) {
+    byOrderType[typ] = await countAggregatedOrders("order_type", typ);
+  }
+
+  const byShippingStatus = {};
+  for (const sh of SHIPPING_STATUSES) {
+    byShippingStatus[sh] = await countAggregatedOrders(
+      "shipping_status",
+      sh,
+    );
+  }
+
+  const byOrderStatus = {
+    canceled: byStatus.canceled,
+    no_replay: byStatus.no_replay,
+    follow_up: byStatus.follow_up,
+    repeater: byStatus.repeater,
+    Confirmed: byStatus.Confirmed,
+    Shipped: byStatus.Shipped,
+    new: byStatus.new,
+    newOrders: byStatus.new,
+    confirmedOrders: byStatus.Confirmed,
+    shippedOrders: byStatus.Shipped,
+    canceledOrders: byStatus.canceled,
+    noReplyOrders: byStatus.no_replay,
+    followUpOrders: byStatus.follow_up,
+    repeaterOrders: byStatus.repeater,
+  };
+
   return {
     totalOrders,
     canceled: byStatus.canceled,
@@ -1104,6 +1206,17 @@ async function getOrdersStatistics({
     Confirmed: byStatus.Confirmed,
     Shipped: byStatus.Shipped,
     new: byStatus.new,
+    newOrders: byStatus.new,
+    confirmedOrders: byStatus.Confirmed,
+    shippedOrders: byStatus.Shipped,
+    canceledOrders: byStatus.canceled,
+    noReplyOrders: byStatus.no_replay,
+    followUpOrders: byStatus.follow_up,
+    repeaterOrders: byStatus.repeater,
+    byOrderStatus,
+    byOrderSource,
+    byOrderType,
+    byShippingStatus,
   };
 }
 
@@ -1323,11 +1436,10 @@ async function fetchAnalyticsOrderRows({
 }
 
 /**
- * تقرير تجميعي: منتج (مطلوب) + موظف + فترة orders.created_at اختيارية.
- * معرف المنتج: UUID في product_id أو easyorder_id — يُطابق العربة بـ @> بدون الاعتماد على sku.
- * إن وُجد product_sku مع UUID يُستخدم ilike على JSON (دمج فلاتر).
- * totalCost = مجموع total_cost أو cost؛
- * averageUnitsPerOrder = مجموع كميات بنود العربة / عدد الطلبات؛
+ * Aggregated analytics: required product (UUID), optional employee, optional
+ * orders.created_at range. Product id in product_id or easyorder_id; cart match
+ * uses @> (no SKU). If product_sku is also set, JSON ilike filters are combined.
+ * totalCost sums total_cost or cost; averageUnitsPerOrder = line quantities / orders;
  * averageOrderValue = totalCost / totalOrders.
  */
 async function getOrdersAnalyticsReport({
