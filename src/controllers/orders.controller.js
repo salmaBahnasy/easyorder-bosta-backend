@@ -304,7 +304,14 @@ async function createOrder(req, res) {
       return;
     }
 
-    const createdOrder = await addWebhookOrder(req.body, { fromWebhook: false });
+    const actor =
+      req.user?.id != null && String(req.user.id).trim() !== ""
+        ? { id: req.user.id, email: req.user.email }
+        : null;
+    const createdOrder = await addWebhookOrder(req.body, {
+      fromWebhook: false,
+      actor,
+    });
 
     res.status(201).json({
       success: true,
@@ -314,7 +321,7 @@ async function createOrder(req, res) {
         url: postOrdersAbsoluteUrl(req),
         headers: { "Content-Type": "application/json" },
         notes: {
-          ar: "إنشاء يدوي: order_source إلزامي. من الويب هوك يُستخدم POST /webhooks/easyorders/order-created ويُضبط المصدر تلقائياً على المتجر.",
+          ar: "إنشاء يدوي: order_source إلزامي. من الويب هوك يُستخدم POST /webhooks/easyorders/order-created ويُضبط المصدر تلقائياً على المتجر. إرسال Authorization: Bearer يملأ created_by_employee_id و user_email في raw_data.",
           manualRequiredFields: ["order_source"],
           manualOptionalMeta: ["order_type", "shipping_status"],
           allowedOrderSources: ORDER_SOURCES,
@@ -358,8 +365,11 @@ async function updateOrder(req, res) {
       return;
     }
 
-    const changedBy = req.user?.id;
-    const updatedOrder = await editOrder(orderId, updates, changedBy);
+    const actor =
+      req.user?.id != null && String(req.user.id).trim() !== ""
+        ? { id: req.user.id, email: req.user.email }
+        : null;
+    const updatedOrder = await editOrder(orderId, updates, actor);
 
     res.json({
       success: true,

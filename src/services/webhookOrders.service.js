@@ -429,14 +429,28 @@ function resolveSourceOrderId(order) {
 }
 
 async function addWebhookOrder(order, options = {}) {
+  const { fromWebhook, actor } = options;
   const sourceOrderId = resolveSourceOrderId(order);
-  const meta = resolveOrderMeta(order, { fromWebhook: options.fromWebhook });
+  const meta = resolveOrderMeta(order, { fromWebhook });
   const raw_data = {
     ...(order && typeof order === "object" && !Array.isArray(order)
       ? order
       : {}),
     ...meta,
   };
+
+  if (actor?.id != null) {
+    const idStr = String(actor.id).trim();
+    if (idStr) {
+      raw_data.created_by_employee_id = idStr;
+      raw_data.createdByEmployeeId = idStr;
+      if (actor.email != null && String(actor.email).trim() !== "") {
+        const em = String(actor.email).trim();
+        raw_data.created_by_email = em;
+        raw_data.user_email = em;
+      }
+    }
+  }
 
   const payload = {
     order_id: sourceOrderId,
@@ -463,13 +477,37 @@ async function addWebhookOrder(order, options = {}) {
   };
 }
 
+/** For embedding a JSON string value inside PostgREST `raw_data.cs.{...}` fragments. */
+function escapePostgrestJsonStringForCsFragment(s) {
+  return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * Some payloads store shipping under `shipping_status`, others under `shippingStatus`.
+ * A single `contains(raw_data, { shipping_status, … })` misses the camelCase key; OR two `cs` predicates matches either shape (ANDed with other filters).
+ */
+function applyRawDataShippingStatusContainsOr(query, shippingValue) {
+  const v = String(shippingValue || "").trim();
+  if (!v) return query;
+  const e = escapePostgrestJsonStringForCsFragment(v);
+  return query.or(
+    `raw_data.cs.{"shipping_status":"${e}"},raw_data.cs.{"shippingStatus":"${e}"}`,
+  );
+}
+
 function applyRawDataMetaContains(query, { order_source, order_type, shipping_status }) {
+  let q = query;
   const rawContains = {};
   if (order_source) rawContains.order_source = order_source;
   if (order_type) rawContains.order_type = order_type;
-  if (shipping_status) rawContains.shipping_status = shipping_status;
-  if (!Object.keys(rawContains).length) return query;
-  return query.contains("raw_data", rawContains);
+  if (Object.keys(rawContains).length) {
+    q = q.contains("raw_data", rawContains);
+  }
+  if (shipping_status) {
+    q = applyRawDataShippingStatusContainsOr(q, shipping_status);
+  }
+  if (!Object.keys(rawContains).length && !shipping_status) return query;
+  return q;
 }
 
 function applyProductCartIlikeFilters(query, { product_id, product_sku }) {
@@ -725,7 +763,14 @@ async function updateOrderStatus(orderId, status, changedBy) {
   };
 }
 
-async function editOrder(orderId, updates, changedBy) {
+async function editOrder(orderId, updates, actor) {
+  const changedBy =
+    actor && typeof actor === "object" && actor.id != null
+      ? String(actor.id).trim()
+      : typeof actor === "string"
+        ? String(actor).trim()
+        : "";
+
   const normalizedUpdates =
     updates && typeof updates === "object" && !Array.isArray(updates)
       ? updates
@@ -860,6 +905,19 @@ async function editOrder(orderId, updates, changedBy) {
     ...(existingOrder.raw_data || {}),
     ...normalizedIncomingUpdates,
   };
+
+  if (changedBy) {
+    mergedRawData.updated_by_employee_id = changedBy;
+    mergedRawData.updatedByEmployeeId = changedBy;
+    if (
+      actor &&
+      typeof actor === "object" &&
+      actor.email != null &&
+      String(actor.email).trim() !== ""
+    ) {
+      mergedRawData.updated_by_email = String(actor.email).trim();
+    }
+  }
 
   const { data, error } = await supabase
     .from(ORDERS_TABLE)
@@ -1054,24 +1112,30 @@ async function getOrdersStatistics({
       : null;
 
   function applyStatsRawContains(query, breakdownDim, breakdownValue) {
-    const rawContains = {};
-    if (breakdownDim === "order_source") {
-      rawContains.order_source = breakdownValue;
-    } else if (order_source) {
-      rawContains.order_source = order_source;
+    let q = query;
+
+    const effectiveOrderSource =
+      breakdownDim === "order_source"
+        ? breakdownValue
+        : order_source || null;
+    const effectiveOrderType =
+      breakdownDim === "order_type" ? breakdownValue : order_type || null;
+    const effectiveShipping =
+      breakdownDim === "shipping_status"
+        ? breakdownValue
+        : shipping_status || null;
+
+    if (effectiveOrderSource) {
+      q = q.contains("raw_data", { order_source: effectiveOrderSource });
     }
-    if (breakdownDim === "order_type") {
-      rawContains.order_type = breakdownValue;
-    } else if (order_type) {
-      rawContains.order_type = order_type;
+    if (effectiveOrderType) {
+      q = q.contains("raw_data", { order_type: effectiveOrderType });
     }
-    if (breakdownDim === "shipping_status") {
-      rawContains.shipping_status = breakdownValue;
-    } else if (shipping_status) {
-      rawContains.shipping_status = shipping_status;
+    if (effectiveShipping) {
+      q = applyRawDataShippingStatusContainsOr(q, effectiveShipping);
     }
-    if (!Object.keys(rawContains).length) return query;
-    return query.contains("raw_data", rawContains);
+
+    return q;
   }
 
   async function countAggregatedOrders(breakdownDim, breakdownValue) {

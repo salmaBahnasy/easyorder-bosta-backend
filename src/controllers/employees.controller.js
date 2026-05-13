@@ -3,7 +3,35 @@ const jwt = require("jsonwebtoken");
 const supabase = require("../config/supabase");
 
 const EMPLOYEES_TABLE = process.env.SUPABASE_EMPLOYEES_TABLE || "employees";
-const ALLOWED_ROLES = ["senior", "agent", "employee", "junior"];
+/** أدوار التطبيق: أدمن أو موظف فقط. القيم القديمة في DB تُعرَّف وتحوّل للعرض وللـ JWT عند تسجيل الدخول. */
+const ALLOWED_ROLES = ["admin", "employee"];
+
+/** يُرجع دائمًا `admin` أو `employee` للـ API والتوكن. */
+function normalizeRoleForApp(dbRole) {
+  const r = String(dbRole || "").trim().toLowerCase();
+  if (r === "admin") return "admin";
+  if (r === "employee") return "employee";
+  if (r === "senior" || r === "agent") return "admin";
+  return "employee";
+}
+
+/** نفس قيمة `role` تحت مفتاح إضافي للواجهات (`admin` | `employee`). */
+function withEmployeeRoleKeys(row) {
+  if (!row || typeof row !== "object") return row;
+  const role = normalizeRoleForApp(row.role);
+  return { ...row, role, employeeRole: role };
+}
+
+function pickRoleFromBody(body) {
+  if (body == null || typeof body !== "object") return "employee";
+  if (body.role != null && String(body.role).trim() !== "") {
+    return String(body.role).trim();
+  }
+  if (body.employeeRole != null && String(body.employeeRole).trim() !== "") {
+    return String(body.employeeRole).trim();
+  }
+  return "employee";
+}
 
 /** Accepts boolean, 0/1, or strings like active / inactive / notactive */
 function coerceIsActive(raw) {
@@ -26,10 +54,10 @@ function buildSafeEmployee(employee) {
   if (!employee) return null;
 
   const { password, ...safeEmployee } = employee;
-  return safeEmployee;
+  return withEmployeeRoleKeys(safeEmployee);
 }
 
-async function loginSenior(req, res) {
+async function login(req, res) {
   try {
     const { email, password } = req.body;
 
@@ -64,14 +92,6 @@ async function loginSenior(req, res) {
       return;
     }
 
-    if (employee.role !== "senior") {
-      res.status(403).json({
-        success: false,
-        message: "Access denied. Senior role required.",
-      });
-      return;
-    }
-
     if (employee.is_active === false) {
       res.status(403).json({
         success: false,
@@ -80,10 +100,13 @@ async function loginSenior(req, res) {
       return;
     }
 
+    const appRole = normalizeRoleForApp(employee.role);
+
     const token = jwt.sign(
       {
         employeeId: employee.id,
-        role: employee.role,
+        role: appRole,
+        employeeRole: appRole,
         email: employee.email,
       },
       process.env.JWT_SECRET || "dev-secret-change-me",
@@ -92,14 +115,14 @@ async function loginSenior(req, res) {
 
     res.json({
       success: true,
-      message: "Senior login successful",
+      message: "Login successful",
       token,
       data: buildSafeEmployee(employee),
     });
   } catch (error) {
     res.status(500).json({
       success: false,
-      message: "Failed to login senior",
+      message: "Failed to login",
       error: error.message,
     });
   }
@@ -119,7 +142,7 @@ async function getEmployees(req, res) {
     res.json({
       success: true,
       total: data.length,
-      data,
+      data: (data || []).map((row) => withEmployeeRoleKeys(row)),
     });
   } catch (error) {
     res.status(500).json({
@@ -132,7 +155,8 @@ async function getEmployees(req, res) {
 
 async function addEmployee(req, res) {
   try {
-    const { name, email, password, role = "employee" } = req.body;
+    const { name, email, password } = req.body;
+    const role = pickRoleFromBody(req.body);
 
     if (!name || !email || !password) {
       res.status(400).json({
@@ -172,7 +196,7 @@ async function addEmployee(req, res) {
     res.status(201).json({
       success: true,
       message: "Employee added successfully",
-      data,
+      data: withEmployeeRoleKeys(data),
     });
   } catch (error) {
     res.status(500).json({
@@ -219,8 +243,16 @@ async function deleteEmployee(req, res) {
 async function editEmployee(req, res) {
   try {
     const { employeeId } = req.params;
-    const { name, email, phone, password, role, is_active, account_status } =
-      req.body;
+    const {
+      name,
+      email,
+      phone,
+      password,
+      role,
+      employeeRole,
+      is_active,
+      account_status,
+    } = req.body;
 
     const updates = {};
 
@@ -253,16 +285,34 @@ async function editEmployee(req, res) {
       updates.is_active = coerced;
     }
 
-    if (role !== undefined) {
-      if (!ALLOWED_ROLES.includes(role)) {
+    if (role !== undefined || employeeRole !== undefined) {
+      const fromRole =
+        role !== undefined && String(role).trim() !== ""
+          ? String(role).trim()
+          : null;
+      const fromER =
+        employeeRole !== undefined && String(employeeRole).trim() !== ""
+          ? String(employeeRole).trim()
+          : null;
+      const r = fromRole ?? fromER ?? "";
+      if (!r) {
         res.status(400).json({
           success: false,
-          message: "Invalid role",
+          message: "role or employeeRole must be admin or employee (non-empty)",
           allowedRoles: ALLOWED_ROLES,
         });
         return;
       }
-      updates.role = role;
+      if (!ALLOWED_ROLES.includes(r)) {
+        res.status(400).json({
+          success: false,
+          message: "Invalid role",
+          allowedRoles: ALLOWED_ROLES,
+          hint: "Send role or employeeRole (admin | employee)",
+        });
+        return;
+      }
+      updates.role = r;
     }
 
     if (password !== undefined) {
@@ -273,7 +323,7 @@ async function editEmployee(req, res) {
       res.status(400).json({
         success: false,
         message:
-          "No fields to update. Send at least one of: name, email, phone, password, role, is_active, account_status",
+          "No fields to update. Send at least one of: name, email, phone, password, role, employeeRole, is_active, account_status",
       });
       return;
     }
@@ -298,7 +348,7 @@ async function editEmployee(req, res) {
     res.json({
       success: true,
       message: "Employee updated successfully",
-      data,
+      data: withEmployeeRoleKeys(data),
     });
   } catch (error) {
     res.status(500).json({
@@ -352,7 +402,7 @@ async function setEmployeeActive(req, res) {
     res.json({
       success: true,
       message: coerced ? "Employee activated" : "Employee deactivated",
-      data,
+      data: withEmployeeRoleKeys(data),
     });
   } catch (error) {
     res.status(500).json({
@@ -364,10 +414,14 @@ async function setEmployeeActive(req, res) {
 }
 
 module.exports = {
-  loginSenior,
+  login,
+  /** @deprecated استخدم `login` أو `POST /api/employees/login` */
+  loginSenior: login,
   getEmployees,
   addEmployee,
   deleteEmployee,
   editEmployee,
   setEmployeeActive,
+  ALLOWED_ROLES,
+  normalizeRoleForApp,
 };

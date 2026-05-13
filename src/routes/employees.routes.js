@@ -1,7 +1,7 @@
 const express = require("express");
 
 const {
-  loginSenior,
+  login,
   getEmployees,
   addEmployee,
   deleteEmployee,
@@ -11,7 +11,10 @@ const {
 
 const router = express.Router();
 
-router.post("/login-senior", loginSenior);
+router.post("/login", login);
+/** @deprecated استخدم `POST /api/employees/login` */
+router.post("/login-senior", login);
+
 router.get("/", getEmployees);
 router.post("/", addEmployee);
 router.patch("/:employeeId/active", setEmployeeActive);
