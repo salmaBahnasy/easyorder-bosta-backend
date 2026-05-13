@@ -52,14 +52,47 @@ function postgrestIlikeStarWrap(needle) {
 }
 
 /**
- * PostgREST يقسّم `col.op.val` على أول `.`؛ `raw_data->>phone.ilike…` يُفسَّر كعمود
- * `raw_data` فيُطبَّق ILIKE على jsonb → `operator does not exist: jsonb ~~*`.
- * اقتباس المسار الكامل يجبر النص المستخرج `->>`.
+ * OR على أكثر من raw_data->>key: استعلام منفصل لكل مسار مع .ilike على عمود واحد
+ * (مفتاح URL = المسار كامل) — يتفادى or=(…) الذي قد يولّد ILIKE على jsonb أو
+ * `"raw_data->>phone"` كاسم عمود غير موجود.
  */
-function postgrestQuoteJsonTextPath(pathExpr) {
-  const s = String(pathExpr || "").trim();
-  if (!s) return '""';
-  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+async function collectOrderIdsUnionIlikePaths({
+  paths,
+  ilikePattern,
+  applyBaseFilters,
+}) {
+  const ids = new Set();
+  const p = ilikePattern;
+  if (!p || !paths?.length) return [];
+
+  for (const col of paths) {
+    let offset = 0;
+    for (;;) {
+      let q = supabase.from(ORDERS_TABLE).select("order_id");
+      q = applyBaseFilters(q);
+      q = q.ilike(col, p);
+      const { data, error } = await q
+        .order("created_at", { ascending: false })
+        .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+      if (error) {
+        throw new Error(error.message);
+      }
+      if (!data || data.length === 0) {
+        break;
+      }
+      for (const row of data) {
+        if (row.order_id != null && String(row.order_id).trim() !== "") {
+          ids.add(String(row.order_id).trim());
+        }
+      }
+      if (data.length < LOG_SELECT_PAGE_SIZE) {
+        break;
+      }
+      offset += LOG_SELECT_PAGE_SIZE;
+    }
+  }
+
+  return [...ids];
 }
 
 /** قيمة آمنة للبحث؛ إن أصبحت فارغة بعد التنقية يُهمَل الفلتر (لا 400). */
@@ -275,7 +308,7 @@ async function fetchOrderIdsFromRawDataEmployeeMarkers({
           .from(ORDERS_TABLE)
           .select("order_id")
           .or(
-            `${postgrestQuoteJsonTextPath("raw_data->>updated_by_email")}.ilike.${p},${postgrestQuoteJsonTextPath("raw_data->>user_email")}.ilike.${p}`,
+            `raw_data->>updated_by_email.ilike.${p},raw_data->>user_email.ilike.${p}`,
           )
           .order("created_at", { ascending: false })
           .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
@@ -344,7 +377,9 @@ async function addWebhookOrder(order, options = {}) {
   const sourceOrderId = resolveSourceOrderId(order);
   const meta = resolveOrderMeta(order, { fromWebhook: options.fromWebhook });
   const raw_data = {
-    ...(order && typeof order === "object" && !Array.isArray(order) ? order : {}),
+    ...(order && typeof order === "object" && !Array.isArray(order)
+      ? order
+      : {}),
     ...meta,
   };
 
@@ -418,9 +453,7 @@ async function getWebhookOrders({
       employeeKey: keyForLogs,
       employeeRawInput: String(employeeId).trim(),
     });
-    orderIdsByEmployee = [
-      ...new Set([...fromLogs, ...fromRawMarkers]),
-    ];
+    orderIdsByEmployee = [...new Set([...fromLogs, ...fromRawMarkers])];
     skipOrderCreatedAtRange = true;
 
     if (!orderIdsByEmployee.length) {
@@ -434,69 +467,77 @@ async function getWebhookOrders({
     }
   }
 
-  let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
-
-  if (from && !skipOrderCreatedAtRange) {
-    query = query.gte("created_at", from.toISOString());
-  }
-  if (to && !skipOrderCreatedAtRange) {
-    query = query.lte("created_at", to.toISOString());
-  }
-  if (status) query = query.eq("status", status);
-
   const rawContains = {};
   if (order_source) rawContains.order_source = order_source;
   if (order_type) rawContains.order_type = order_type;
   if (shipping_status) rawContains.shipping_status = shipping_status;
-  if (Object.keys(rawContains).length) {
-    query = query.contains("raw_data", rawContains);
-  }
 
-  if (orderIdsByEmployee) {
-    query = applyOrderIdMembershipFilter(query, orderIdsByEmployee);
+  function applyBaseListFilters(q) {
+    if (from && !skipOrderCreatedAtRange) {
+      q = q.gte("created_at", from.toISOString());
+    }
+    if (to && !skipOrderCreatedAtRange) {
+      q = q.lte("created_at", to.toISOString());
+    }
+    if (status) {
+      q = q.eq("status", status);
+    }
+    if (Object.keys(rawContains).length) {
+      q = q.contains("raw_data", rawContains);
+    }
+    if (orderIdsByEmployee) {
+      q = applyOrderIdMembershipFilter(q, orderIdsByEmployee);
+    }
+    return q;
   }
 
   const pidNeedle = parseProductFilterInput(product_id);
   const skuNeedle = parseProductFilterInput(product_sku);
   const phoneNeedle = parseProductFilterInput(phone);
+  const pPhone = postgrestIlikeStarWrap(phoneNeedle);
 
-  if (phoneNeedle) {
-    const p = postgrestIlikeStarWrap(phoneNeedle);
-    if (p) {
-      query = query.or(
-        [
-          "raw_data->>phone",
-          "raw_data->>mobile",
-          "raw_data->>customer_phone",
-          "raw_data->>telephone",
-        ]
-          .map((path) => `${postgrestQuoteJsonTextPath(path)}.ilike.${p}`)
-          .join(","),
-      );
+  let phoneOrderIds = null;
+  if (pPhone) {
+    phoneOrderIds = await collectOrderIdsUnionIlikePaths({
+      paths: ["raw_data->>phone", "raw_data->>mobile"],
+      ilikePattern: pPhone,
+      applyBaseFilters: applyBaseListFilters,
+    });
+    if (!phoneOrderIds.length) {
+      return {
+        page,
+        limit,
+        total: 0,
+        totalPages: 1,
+        data: [],
+      };
     }
+  }
+
+  let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
+  query = applyBaseListFilters(query);
+  if (phoneOrderIds) {
+    query = applyOrderIdMembershipFilter(query, phoneOrderIds);
   }
 
   if (pidNeedle && skuNeedle) {
     const p1 = postgrestIlikeStarWrap(pidNeedle);
     const p2 = postgrestIlikeStarWrap(skuNeedle);
     if (p1 && p2) {
-      query = query.ilikeAllOf(
-        postgrestQuoteJsonTextPath("raw_data->>cart_items"),
-        [p1, p2],
-      );
+      query = query.ilikeAllOf("raw_data->>cart_items", [p1, p2]);
     }
   } else if (pidNeedle) {
     const p = postgrestIlikeStarWrap(pidNeedle);
     if (p) {
       query = query.or(
-        `${postgrestQuoteJsonTextPath("raw_data->>cart_items")}.ilike.${p},${postgrestQuoteJsonTextPath("raw_data->>cartItems")}.ilike.${p}`,
+        `raw_data->>cart_items.ilike.${p},raw_data->>cartItems.ilike.${p}`,
       );
     }
   } else if (skuNeedle) {
     const p = postgrestIlikeStarWrap(skuNeedle);
     if (p) {
       query = query.or(
-        `${postgrestQuoteJsonTextPath("raw_data->>cart_items")}.ilike.${p},${postgrestQuoteJsonTextPath("raw_data->>cartItems")}.ilike.${p}`,
+        `raw_data->>cart_items.ilike.${p},raw_data->>cartItems.ilike.${p}`,
       );
     }
   }
@@ -625,29 +666,56 @@ async function editOrder(orderId, updates, changedBy) {
   const normalizedIncomingUpdates = { ...normalizedUpdates };
 
   // Keep common aliases in sync so list/detail pages read same values.
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "firstName")) {
+  if (
+    Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "firstName")
+  ) {
     normalizedIncomingUpdates.full_name = normalizedIncomingUpdates.firstName;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "full_name")) {
+  if (
+    Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "full_name")
+  ) {
     normalizedIncomingUpdates.firstName = normalizedIncomingUpdates.full_name;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "mobile")) {
+  if (
+    Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "mobile")
+  ) {
     normalizedIncomingUpdates.phone = normalizedIncomingUpdates.mobile;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "phone")) {
+  if (
+    Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "phone")
+  ) {
     normalizedIncomingUpdates.mobile = normalizedIncomingUpdates.phone;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "orderSource")) {
-    normalizedIncomingUpdates.order_source = normalizedIncomingUpdates.orderSource;
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "orderSource",
+    )
+  ) {
+    normalizedIncomingUpdates.order_source =
+      normalizedIncomingUpdates.orderSource;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "orderType")) {
+  if (
+    Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "orderType")
+  ) {
     normalizedIncomingUpdates.order_type = normalizedIncomingUpdates.orderType;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "shippingStatus")) {
-    normalizedIncomingUpdates.shipping_status = normalizedIncomingUpdates.shippingStatus;
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "shippingStatus",
+    )
+  ) {
+    normalizedIncomingUpdates.shipping_status =
+      normalizedIncomingUpdates.shippingStatus;
   }
 
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "order_source")) {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "order_source",
+    )
+  ) {
     const v = normalizeMetaString(normalizedIncomingUpdates.order_source);
     if (!ORDER_SOURCES.includes(v)) {
       const invalidStatusError = new Error("Invalid order_source");
@@ -656,7 +724,12 @@ async function editOrder(orderId, updates, changedBy) {
     }
     normalizedIncomingUpdates.order_source = v;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "order_type")) {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "order_type",
+    )
+  ) {
     const v = normalizeMetaString(normalizedIncomingUpdates.order_type);
     if (!ORDER_TYPES.includes(v)) {
       const invalidStatusError = new Error("Invalid order_type");
@@ -665,7 +738,12 @@ async function editOrder(orderId, updates, changedBy) {
     }
     normalizedIncomingUpdates.order_type = v;
   }
-  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "shipping_status")) {
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "shipping_status",
+    )
+  ) {
     const v = normalizeMetaString(normalizedIncomingUpdates.shipping_status);
     if (!SHIPPING_STATUSES.includes(v)) {
       const invalidStatusError = new Error("Invalid shipping_status");
@@ -748,11 +826,7 @@ function encodeOrderIdForInList(id) {
 /** فلتر order_id.in — يتقسّم إلى or(in1,in2,...) لتجنب URL طويل جداً */
 function applyOrderIdMembershipFilter(query, orderIds) {
   const ids = [
-    ...new Set(
-      (orderIds || [])
-        .map((x) => String(x).trim())
-        .filter(Boolean),
-    ),
+    ...new Set((orderIds || []).map((x) => String(x).trim()).filter(Boolean)),
   ];
   if (!ids.length) return query;
   if (ids.length <= ORDER_ID_IN_URL_CHUNK) {
