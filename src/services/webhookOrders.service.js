@@ -44,6 +44,24 @@ function sanitizeIlikeNeedle(value) {
   return s.replace(/[%_\\,(){}]/g, "");
 }
 
+/** نمط ILIKE لـ PostgREST على jsonb->>text؛ * بدل % (موصى به في توثيق PostgREST داخل or/قيم معقّدة). */
+function postgrestIlikeStarWrap(needle) {
+  const n = sanitizeIlikeNeedle(needle);
+  if (!n) return null;
+  return `*${n.replace(/\*/g, "\\*")}*`;
+}
+
+/**
+ * PostgREST يقسّم `col.op.val` على أول `.`؛ `raw_data->>phone.ilike…` يُفسَّر كعمود
+ * `raw_data` فيُطبَّق ILIKE على jsonb → `operator does not exist: jsonb ~~*`.
+ * اقتباس المسار الكامل يجبر النص المستخرج `->>`.
+ */
+function postgrestQuoteJsonTextPath(pathExpr) {
+  const s = String(pathExpr || "").trim();
+  if (!s) return '""';
+  return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
 /** قيمة آمنة للبحث؛ إن أصبحت فارغة بعد التنقية يُهمَل الفلتر (لا 400). */
 function parseProductFilterInput(raw) {
   if (raw == null || String(raw).trim() === "") return "";
@@ -126,7 +144,7 @@ async function resolveEmployeeToIdForLogs(employeeFilter) {
   if (!raw.includes("@")) return raw;
 
   const literal = escapeIlikeLiteral(raw);
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from(EMPLOYEES_TABLE)
     .select("id")
     .ilike("email", literal)
@@ -136,7 +154,19 @@ async function resolveEmployeeToIdForLogs(employeeFilter) {
     throw new Error(error.message);
   }
 
-  const row = Array.isArray(data) && data.length ? data[0] : null;
+  let row = Array.isArray(data) && data.length ? data[0] : null;
+  if (!row) {
+    ({ data, error } = await supabase
+      .from(EMPLOYEES_TABLE)
+      .select("id")
+      .eq("email", raw.toLowerCase())
+      .limit(1));
+    if (error) {
+      throw new Error(error.message);
+    }
+    row = Array.isArray(data) && data.length ? data[0] : null;
+  }
+
   return row?.id != null ? String(row.id) : null;
 }
 
@@ -146,7 +176,12 @@ const LOG_SELECT_PAGE_SIZE = 1000;
  * يجمع order_id مميزة من order_status_logs حيث changed_by = الموظف.
  * الفترة from/to تُطبَّق على changed_at (وقت تغيير الحالة)، مع جلب كل الصفوف (تجاوز حد الـ 1000 الافتراضي).
  */
-async function fetchDistinctOrderIdsFromLogs({ changedByKey, from, to }) {
+async function fetchDistinctOrderIdsFromLogs({
+  changedByKey,
+  from,
+  to,
+  ignoreDateRange = false,
+}) {
   const ids = new Set();
   let offset = 0;
 
@@ -157,8 +192,12 @@ async function fetchDistinctOrderIdsFromLogs({ changedByKey, from, to }) {
       .eq("changed_by", changedByKey)
       .order("changed_at", { ascending: true });
 
-    if (from) q = q.gte("changed_at", from.toISOString());
-    if (to) q = q.lte("changed_at", to.toISOString());
+    if (from && !ignoreDateRange) {
+      q = q.gte("changed_at", from.toISOString());
+    }
+    if (to && !ignoreDateRange) {
+      q = q.lte("changed_at", to.toISOString());
+    }
 
     q = q.range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
 
@@ -176,6 +215,83 @@ async function fetchDistinctOrderIdsFromLogs({ changedByKey, from, to }) {
 
     if (data.length < LOG_SELECT_PAGE_SIZE) break;
     offset += LOG_SELECT_PAGE_SIZE;
+  }
+
+  return [...ids];
+}
+
+const UUID_LIKE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * طلبات يظهر في raw_data أن هذا الموظف عالجها (PATCH) — حقول من الواجهة مثل
+ * modifier_employee_id / updated_by_employee_id / الإيميلات.
+ * يُكمّل order_status_logs التي تُسجَّل فقط عند تغيير status.
+ */
+async function fetchOrderIdsFromRawDataEmployeeMarkers({
+  employeeKey,
+  employeeRawInput,
+}) {
+  const ids = new Set();
+
+  async function addAllOrderIdsEqJsonKey(jsonKey, value) {
+    let offset = 0;
+    for (;;) {
+      const col = `raw_data->>${jsonKey}`;
+      const { data, error } = await supabase
+        .from(ORDERS_TABLE)
+        .select("order_id")
+        .eq(col, value)
+        .order("created_at", { ascending: false })
+        .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+      if (error) {
+        throw new Error(error.message);
+      }
+      if (!data || data.length === 0) break;
+      for (const row of data) {
+        if (row.order_id != null && String(row.order_id).trim() !== "") {
+          ids.add(String(row.order_id).trim());
+        }
+      }
+      if (data.length < LOG_SELECT_PAGE_SIZE) break;
+      offset += LOG_SELECT_PAGE_SIZE;
+    }
+  }
+
+  if (UUID_LIKE.test(employeeKey)) {
+    await addAllOrderIdsEqJsonKey("modifier_employee_id", employeeKey);
+    await addAllOrderIdsEqJsonKey("updated_by_employee_id", employeeKey);
+    await addAllOrderIdsEqJsonKey("created_by_employee_id", employeeKey);
+    await addAllOrderIdsEqJsonKey("assigned_employee_id", employeeKey);
+  }
+
+  const raw = String(employeeRawInput || "").trim();
+  if (raw.includes("@")) {
+    const p = postgrestIlikeStarWrap(raw);
+    if (p) {
+      let offset = 0;
+      for (;;) {
+        const { data, error } = await supabase
+          .from(ORDERS_TABLE)
+          .select("order_id")
+          .or(
+            `${postgrestQuoteJsonTextPath("raw_data->>updated_by_email")}.ilike.${p},${postgrestQuoteJsonTextPath("raw_data->>user_email")}.ilike.${p}`,
+          )
+          .order("created_at", { ascending: false })
+          .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+        if (error) {
+          throw new Error(error.message);
+        }
+        if (!data || data.length === 0) break;
+        for (const row of data) {
+          if (row.order_id != null && String(row.order_id).trim() !== "") {
+            ids.add(String(row.order_id).trim());
+          }
+        }
+        if (data.length < LOG_SELECT_PAGE_SIZE) break;
+        offset += LOG_SELECT_PAGE_SIZE;
+      }
+    }
   }
 
   return [...ids];
@@ -270,6 +386,7 @@ async function getWebhookOrders({
   product_id,
   product_sku,
   phone,
+  ignoreEmployeeLogDateRange = false,
 }) {
   const fromIndex = (page - 1) * limit;
   const toIndex = fromIndex + limit - 1;
@@ -291,11 +408,19 @@ async function getWebhookOrders({
 
     const keyForLogs = changedByKey || String(employeeId).trim();
 
-    orderIdsByEmployee = await fetchDistinctOrderIdsFromLogs({
+    const fromLogs = await fetchDistinctOrderIdsFromLogs({
       changedByKey: keyForLogs,
       from,
       to,
+      ignoreDateRange: ignoreEmployeeLogDateRange,
     });
+    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
+      employeeKey: keyForLogs,
+      employeeRawInput: String(employeeId).trim(),
+    });
+    orderIdsByEmployee = [
+      ...new Set([...fromLogs, ...fromRawMarkers]),
+    ];
     skipOrderCreatedAtRange = true;
 
     if (!orderIdsByEmployee.length) {
@@ -309,11 +434,7 @@ async function getWebhookOrders({
     }
   }
 
-  let query = supabase
-    .from(ORDERS_TABLE)
-    .select("*", { count: "exact" })
-    .order("created_at", { ascending: false })
-    .range(fromIndex, toIndex);
+  let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
 
   if (from && !skipOrderCreatedAtRange) {
     query = query.gte("created_at", from.toISOString());
@@ -331,23 +452,58 @@ async function getWebhookOrders({
     query = query.contains("raw_data", rawContains);
   }
 
-  if (orderIdsByEmployee) query = query.in("order_id", orderIdsByEmployee);
+  if (orderIdsByEmployee) {
+    query = applyOrderIdMembershipFilter(query, orderIdsByEmployee);
+  }
 
   const pidNeedle = parseProductFilterInput(product_id);
   const skuNeedle = parseProductFilterInput(product_sku);
   const phoneNeedle = parseProductFilterInput(phone);
-  const jsonTextCol = '"raw_data"::text';
 
-  const textPatterns = [];
-  if (pidNeedle) textPatterns.push(`%${pidNeedle}%`);
-  if (skuNeedle) textPatterns.push(`%${skuNeedle}%`);
-  if (phoneNeedle) textPatterns.push(`%${phoneNeedle}%`);
-
-  if (textPatterns.length === 1) {
-    query = query.ilike(jsonTextCol, textPatterns[0]);
-  } else if (textPatterns.length > 1) {
-    query = query.ilikeAllOf(jsonTextCol, textPatterns);
+  if (phoneNeedle) {
+    const p = postgrestIlikeStarWrap(phoneNeedle);
+    if (p) {
+      query = query.or(
+        [
+          "raw_data->>phone",
+          "raw_data->>mobile",
+          "raw_data->>customer_phone",
+          "raw_data->>telephone",
+        ]
+          .map((path) => `${postgrestQuoteJsonTextPath(path)}.ilike.${p}`)
+          .join(","),
+      );
+    }
   }
+
+  if (pidNeedle && skuNeedle) {
+    const p1 = postgrestIlikeStarWrap(pidNeedle);
+    const p2 = postgrestIlikeStarWrap(skuNeedle);
+    if (p1 && p2) {
+      query = query.ilikeAllOf(
+        postgrestQuoteJsonTextPath("raw_data->>cart_items"),
+        [p1, p2],
+      );
+    }
+  } else if (pidNeedle) {
+    const p = postgrestIlikeStarWrap(pidNeedle);
+    if (p) {
+      query = query.or(
+        `${postgrestQuoteJsonTextPath("raw_data->>cart_items")}.ilike.${p},${postgrestQuoteJsonTextPath("raw_data->>cartItems")}.ilike.${p}`,
+      );
+    }
+  } else if (skuNeedle) {
+    const p = postgrestIlikeStarWrap(skuNeedle);
+    if (p) {
+      query = query.or(
+        `${postgrestQuoteJsonTextPath("raw_data->>cart_items")}.ilike.${p},${postgrestQuoteJsonTextPath("raw_data->>cartItems")}.ilike.${p}`,
+      );
+    }
+  }
+
+  query = query
+    .order("created_at", { ascending: false })
+    .range(fromIndex, toIndex);
 
   const { data, count, error } = await query;
 
@@ -575,13 +731,62 @@ function chunkArray(arr, size) {
   return out;
 }
 
+const ORDER_ID_IN_URL_CHUNK = 80;
+
+const PostgrestReservedCharsRegexp = new RegExp("[,()]");
+
+/** PostgREST يفرض أحرفاً محجوزة داخل in.(...) — نقترب من منطق supabase-js.in */
+function encodeOrderIdForInList(id) {
+  const s = String(id).trim();
+  if (!s) return null;
+  if (PostgrestReservedCharsRegexp.test(s)) {
+    return `"${s.replace(/"/g, '\\"')}"`;
+  }
+  return s;
+}
+
+/** فلتر order_id.in — يتقسّم إلى or(in1,in2,...) لتجنب URL طويل جداً */
+function applyOrderIdMembershipFilter(query, orderIds) {
+  const ids = [
+    ...new Set(
+      (orderIds || [])
+        .map((x) => String(x).trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!ids.length) return query;
+  if (ids.length <= ORDER_ID_IN_URL_CHUNK) {
+    return query.in("order_id", ids);
+  }
+  const orParts = [];
+  for (let i = 0; i < ids.length; i += ORDER_ID_IN_URL_CHUNK) {
+    const inner = ids
+      .slice(i, i + ORDER_ID_IN_URL_CHUNK)
+      .map(encodeOrderIdForInList)
+      .filter(Boolean)
+      .join(",");
+    if (inner) {
+      orParts.push(`order_id.in.(${inner})`);
+    }
+  }
+  if (!orParts.length) return query;
+  return query.or(orParts.join(","));
+}
+
 /**
  * Order counts by status. Optional employeeId = orders that appear in
- * order_status_logs for that employee, with from/to applied to logs.changed_at
- * (same semantics as GET /api/orders?employeeId=). Without employeeId, from/to
- * apply to orders.created_at.
+ * order_status_logs for that employee (changed_by) with from/to on logs.changed_at,
+ * OR orders whose raw_data carries that employee (modifier/updated/created/assigned id
+ * or email markers), merged and deduped. Unless ignoreEmployeeLogDateRange, logs use
+ * the date window; raw_data marker matches are not date-scoped. Without employeeId,
+ * from/to apply to orders.created_at.
  */
-async function getOrdersStatistics({ employeeId, from, to }) {
+async function getOrdersStatistics({
+  employeeId,
+  from,
+  to,
+  ignoreEmployeeLogDateRange = false,
+}) {
   let orderIds = null;
   let filterOrdersByCreatedAtInRange = true;
 
@@ -605,11 +810,17 @@ async function getOrdersStatistics({ employeeId, from, to }) {
 
     const keyForLogs = changedByKey || String(employeeKey);
 
-    orderIds = await fetchDistinctOrderIdsFromLogs({
+    const fromLogs = await fetchDistinctOrderIdsFromLogs({
       changedByKey: keyForLogs,
       from,
       to,
+      ignoreDateRange: ignoreEmployeeLogDateRange,
     });
+    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
+      employeeKey: keyForLogs,
+      employeeRawInput: String(employeeKey).trim(),
+    });
+    orderIds = [...new Set([...fromLogs, ...fromRawMarkers])];
     filterOrdersByCreatedAtInRange = false;
 
     if (!orderIds.length) {

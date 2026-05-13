@@ -130,6 +130,13 @@ async function getOrders(req, res) {
         req.query.customerPhone ||
         req.query.customer_phone,
     );
+    const employee_scope = optionalQueryParam(
+      req.query.employee_scope || req.query.employeeScope,
+    );
+    const ignoreEmployeeLogDateRange =
+      employee_scope === "all" ||
+      employee_scope === "any" ||
+      employee_scope === "all_time";
 
     if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
       res.status(400).json({
@@ -183,6 +190,7 @@ async function getOrders(req, res) {
       product_id,
       product_sku,
       phone,
+      ignoreEmployeeLogDateRange,
     });
 
     const appliedFilters = {
@@ -191,6 +199,8 @@ async function getOrders(req, res) {
       status,
       employeeId,
       employee_id: employeeId,
+      employee_scope: employee_scope || undefined,
+      ignoreEmployeeLogDateRange: ignoreEmployeeLogDateRange || undefined,
       order_source,
       order_type,
       shipping_status,
@@ -211,7 +221,7 @@ async function getOrders(req, res) {
       },
       appliedFilters,
       listOrdersQueryReference:
-        "GET /api/orders?...&phone|mobile|customerPhone|customer_phone= — بحث جزئي داخل raw_data (يشمل phone و mobile وغيرهما). employeeId أو employee_id: uuid أو إيميل. بدون موظف: from/to على created_at. مع موظف: from/to على order_status_logs.changed_at.",
+        "GET /api/orders?... phone|mobile|customer_phone — بحث في raw_data. employeeId|employee_id (uuid أو إيميل). employee_scope=all|any|all_time — مع موظف: تجاهل from/to على سجلات النشاط وجلب كل الطلبات التي غيّرها الموظف. بدون employee_scope: from/to على order_status_logs.changed_at. بدون موظف: from/to على orders.created_at.",
       ...result,
     });
   } catch (error) {
@@ -478,6 +488,14 @@ async function getOrdersStats(req, res) {
       req.query.employeeId || req.query.userId || req.query.employee_id,
     );
 
+    const employee_scope = normalizeQueryId(
+      req.query.employee_scope || req.query.employeeScope,
+    );
+    const ignoreEmployeeLogDateRange =
+      employee_scope === "all" ||
+      employee_scope === "any" ||
+      employee_scope === "all_time";
+
     let from = null;
     let to = null;
 
@@ -507,6 +525,7 @@ async function getOrdersStats(req, res) {
       employeeId,
       from,
       to,
+      ignoreEmployeeLogDateRange,
     });
 
     const statsWithLegacyKeys = {
@@ -524,6 +543,8 @@ async function getOrdersStats(req, res) {
       success: true,
       filters: {
         employeeId,
+        employee_scope: employee_scope || null,
+        ignoreEmployeeLogDateRange,
         from: from ? from.toISOString() : null,
         to: to ? to.toISOString() : null,
       },
