@@ -6,6 +6,7 @@ const {
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,
+  getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
   ORDER_TYPES,
@@ -118,9 +119,12 @@ async function getOrders(req, res) {
     const shipping_status = optionalQueryParam(
       req.query.shipping_status || req.query.shippingStatus,
     );
-    const product_id = optionalQueryParam(
-      req.query.product_id || req.query.productId,
+    const easyorder_id = optionalQueryParam(
+      req.query.easyorder_id || req.query.easyorderId,
     );
+    const product_id =
+      optionalQueryParam(req.query.product_id || req.query.productId) ||
+      easyorder_id;
     const product_sku = optionalQueryParam(
       req.query.product_sku || req.query.productSku,
     );
@@ -205,6 +209,7 @@ async function getOrders(req, res) {
       order_type,
       shipping_status,
       product_id,
+      easyorder_id: easyorder_id || undefined,
       product_sku,
       phone,
       page,
@@ -221,7 +226,7 @@ async function getOrders(req, res) {
       },
       appliedFilters,
       listOrdersQueryReference:
-        "GET /api/orders?... phone|mobile|customer_phone — بحث في raw_data. employeeId|employee_id (uuid أو إيميل). employee_scope=all|any|all_time — مع موظف: تجاهل from/to على سجلات النشاط وجلب كل الطلبات التي غيّرها الموظف. بدون employee_scope: from/to على order_status_logs.changed_at. بدون موظف: from/to على orders.created_at.",
+        "GET /api/orders?... phone|mobile|customer_phone — بحث في raw_data. employeeId|employee_id (uuid أو إيميل). employee_scope=all|any|all_time — مع موظف: تجاهل from/to على سجلات النشاط وجلب كل الطلبات التي غيّرها الموظف. بدون employee_scope: from/to على order_status_logs.changed_at. بدون موظف: from/to على orders.created_at. product_id أو easyorder_id (UUID): مطابقة العربة بـ @> بدون sku.",
       ...result,
     });
   } catch (error) {
@@ -496,6 +501,65 @@ async function getOrdersStats(req, res) {
       employee_scope === "any" ||
       employee_scope === "all_time";
 
+    const status = optionalQueryParam(req.query.status);
+    const order_source = optionalQueryParam(
+      req.query.order_source || req.query.orderSource,
+    );
+    const order_type = optionalQueryParam(
+      req.query.order_type || req.query.orderType,
+    );
+    const shipping_status = optionalQueryParam(
+      req.query.shipping_status || req.query.shippingStatus,
+    );
+    const easyorder_id = optionalQueryParam(
+      req.query.easyorder_id || req.query.easyorderId,
+    );
+    const product_id =
+      optionalQueryParam(req.query.product_id || req.query.productId) ||
+      easyorder_id;
+    const product_sku = optionalQueryParam(
+      req.query.product_sku || req.query.productSku,
+    );
+
+    if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid status filter",
+        allowedStatuses: ALLOWED_ORDER_STATUSES,
+      });
+      return;
+    }
+
+    if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid order_source filter",
+        allowedOrderSources: ORDER_SOURCES,
+      });
+      return;
+    }
+
+    if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid order_type filter",
+        allowedOrderTypes: ORDER_TYPES,
+      });
+      return;
+    }
+
+    if (
+      shipping_status &&
+      !SHIPPING_STATUSES.includes(String(shipping_status).trim())
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid shipping_status filter",
+        allowedShippingStatuses: SHIPPING_STATUSES,
+      });
+      return;
+    }
+
     let from = null;
     let to = null;
 
@@ -526,6 +590,12 @@ async function getOrdersStats(req, res) {
       from,
       to,
       ignoreEmployeeLogDateRange,
+      order_source,
+      order_type,
+      shipping_status,
+      status,
+      product_id,
+      product_sku,
     });
 
     const statsWithLegacyKeys = {
@@ -547,6 +617,13 @@ async function getOrdersStats(req, res) {
         ignoreEmployeeLogDateRange,
         from: from ? from.toISOString() : null,
         to: to ? to.toISOString() : null,
+        status: status || null,
+        order_source: order_source || null,
+        order_type: order_type || null,
+        shipping_status: shipping_status || null,
+        product_id: product_id || null,
+        easyorder_id: easyorder_id || null,
+        product_sku: product_sku || null,
       },
       stats: statsWithLegacyKeys,
     });
@@ -554,6 +631,122 @@ async function getOrdersStats(req, res) {
     res.status(500).json({
       success: false,
       message: "Failed to get stats",
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * GET /api/orders/analytics — تقرير تجميعي: منتج (مطلوب) + موظف + فترة created_at اختيارية.
+ */
+async function getOrdersAnalytics(req, res) {
+  try {
+    const easyorder_id = optionalQueryParam(
+      req.query.easyorder_id || req.query.easyorderId,
+    );
+    const product_id =
+      optionalQueryParam(req.query.product_id || req.query.productId) ||
+      easyorder_id;
+    const product_sku = optionalQueryParam(
+      req.query.product_sku || req.query.productSku,
+    );
+
+    if (!product_id && !product_sku) {
+      res.status(400).json({
+        success: false,
+        message:
+          "product_id or easyorder_id is required (catalog UUID). product_sku is optional.",
+      });
+      return;
+    }
+
+    const employeeId = normalizeQueryId(
+      req.query.employeeId || req.query.userId || req.query.employee_id,
+    );
+
+    const employee_scope = normalizeQueryId(
+      req.query.employee_scope || req.query.employeeScope,
+    );
+    const ignoreEmployeeLogDateRange =
+      employee_scope === "all" ||
+      employee_scope === "any" ||
+      employee_scope === "all_time";
+
+    let from = null;
+    let to = null;
+
+    if (req.query.from) {
+      from = new Date(req.query.from);
+      if (Number.isNaN(from.getTime())) {
+        res.status(400).json({
+          success: false,
+          message: "Invalid from date",
+        });
+        return;
+      }
+    }
+
+    if (req.query.to) {
+      to = new Date(req.query.to);
+      if (Number.isNaN(to.getTime())) {
+        res.status(400).json({
+          success: false,
+          message: "Invalid to date",
+        });
+        return;
+      }
+    }
+
+    const report = await getOrdersAnalyticsReport({
+      product_id,
+      product_sku,
+      employeeId,
+      from,
+      to,
+      ignoreEmployeeLogDateRange,
+    });
+
+    res.json({
+      success: true,
+      filters: {
+        product_id: product_id || null,
+        easyorder_id: easyorder_id || null,
+        product_sku: product_sku || null,
+        employeeId,
+        employee_scope: employee_scope || null,
+        ignoreEmployeeLogDateRange,
+        from: from ? from.toISOString() : null,
+        to: to ? to.toISOString() : null,
+      },
+      summary: {
+        totalCost: report.totalCost,
+        totalOrders: report.totalOrders,
+        totalProductUnits: report.totalProductUnits,
+        averageUnitsPerOrder: report.averageUnitsPerOrder,
+        averageOrderValue: report.averageOrderValue,
+      },
+      summaryAr: {
+        "اجمالي_المبيعات_total_cost": report.totalCost,
+        "اجمالي_الطلبات": report.totalOrders,
+        "اجمالي_وحدات_المنتجات_في_العربة": report.totalProductUnits,
+        "نسبية_المبيعات_متوسط_الكمية_لكل_طلب": report.averageUnitsPerOrder,
+        "سعر_الطلب_متوسط_قيمة_الطلب": report.averageOrderValue,
+      },
+      byOrderSource: report.byOrderSource,
+      byOrderType: report.byOrderType,
+      byOrderStatus: report.byOrderStatus,
+      byShippingStatus: report.byShippingStatus,
+      meta: {
+        truncated: report.truncated,
+        maxRowsCap: report.maxRowsCap,
+        note:
+          "Buckets use key __unset when value missing in raw_data or status.",
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to build orders analytics",
       error: error.message,
     });
   }
@@ -567,4 +760,5 @@ module.exports = {
   sendOrderToBosta,
   getEasyOrderDetails,
   getOrdersStats,
+  getOrdersAnalytics,
 };

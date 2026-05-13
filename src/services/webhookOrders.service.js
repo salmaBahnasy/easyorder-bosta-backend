@@ -257,6 +257,61 @@ const UUID_LIKE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
+ * طلبات تحتوي العربة على معرف المنتج (UUID) بأحد الأشكال الشائعة في EasyOrder —
+ * OR عبر عدة استعلامات contains (أدق من sku / ilike على النص الكامل).
+ */
+async function collectOrderIdsUnionContainsCartProductUuid(
+  productUuid,
+  applyBaseFilters,
+) {
+  const id = String(productUuid || "").trim();
+  if (!id || !UUID_LIKE.test(id)) return [];
+
+  const blobs = [
+    { cart_items: [{ product_id: id }] },
+    { cart_items: [{ id: id }] },
+    { cart_items: [{ easyorder_id: id }] },
+    { cart_items: [{ product: { id: id } }] },
+    { cart_items: [{ product: { easyorder_id: id } }] },
+    { cartItems: [{ product_id: id }] },
+    { cartItems: [{ id: id }] },
+    { cartItems: [{ easyorder_id: id }] },
+    { cartItems: [{ product: { id: id } }] },
+    { cartItems: [{ product: { easyorder_id: id } }] },
+  ];
+
+  const ids = new Set();
+  for (const blob of blobs) {
+    let offset = 0;
+    for (;;) {
+      let q = supabase.from(ORDERS_TABLE).select("order_id");
+      q = applyBaseFilters(q);
+      q = q.contains("raw_data", blob);
+      const { data, error } = await q
+        .order("created_at", { ascending: false })
+        .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+      if (error) {
+        throw new Error(error.message);
+      }
+      if (!data || data.length === 0) {
+        break;
+      }
+      for (const row of data) {
+        if (row.order_id != null && String(row.order_id).trim() !== "") {
+          ids.add(String(row.order_id).trim());
+        }
+      }
+      if (data.length < LOG_SELECT_PAGE_SIZE) {
+        break;
+      }
+      offset += LOG_SELECT_PAGE_SIZE;
+    }
+  }
+
+  return [...ids];
+}
+
+/**
  * طلبات يظهر في raw_data أن هذا الموظف عالجها (PATCH) — حقول من الواجهة مثل
  * modifier_employee_id / updated_by_employee_id / الإيميلات.
  * يُكمّل order_status_logs التي تُسجَّل فقط عند تغيير status.
@@ -408,6 +463,46 @@ async function addWebhookOrder(order, options = {}) {
   };
 }
 
+function applyRawDataMetaContains(query, { order_source, order_type, shipping_status }) {
+  const rawContains = {};
+  if (order_source) rawContains.order_source = order_source;
+  if (order_type) rawContains.order_type = order_type;
+  if (shipping_status) rawContains.shipping_status = shipping_status;
+  if (!Object.keys(rawContains).length) return query;
+  return query.contains("raw_data", rawContains);
+}
+
+function applyProductCartIlikeFilters(query, { product_id, product_sku }) {
+  const pidNeedle = parseProductFilterInput(product_id);
+  const skuNeedle = parseProductFilterInput(product_sku);
+  if (pidNeedle && skuNeedle) {
+    const p1 = postgrestIlikeStarWrap(pidNeedle);
+    const p2 = postgrestIlikeStarWrap(skuNeedle);
+    if (p1 && p2) {
+      return query.ilikeAllOf("raw_data->>cart_items", [p1, p2]);
+    }
+    return query;
+  }
+  if (pidNeedle) {
+    const p = postgrestIlikeStarWrap(pidNeedle);
+    if (p) {
+      return query.or(
+        `raw_data->>cart_items.ilike.${p},raw_data->>cartItems.ilike.${p}`,
+      );
+    }
+    return query;
+  }
+  if (skuNeedle) {
+    const p = postgrestIlikeStarWrap(skuNeedle);
+    if (p) {
+      return query.or(
+        `raw_data->>cart_items.ilike.${p},raw_data->>cartItems.ilike.${p}`,
+      );
+    }
+  }
+  return query;
+}
+
 async function getWebhookOrders({
   page = 1,
   limit = 20,
@@ -467,11 +562,6 @@ async function getWebhookOrders({
     }
   }
 
-  const rawContains = {};
-  if (order_source) rawContains.order_source = order_source;
-  if (order_type) rawContains.order_type = order_type;
-  if (shipping_status) rawContains.shipping_status = shipping_status;
-
   function applyBaseListFilters(q) {
     if (from && !skipOrderCreatedAtRange) {
       q = q.gte("created_at", from.toISOString());
@@ -482,17 +572,17 @@ async function getWebhookOrders({
     if (status) {
       q = q.eq("status", status);
     }
-    if (Object.keys(rawContains).length) {
-      q = q.contains("raw_data", rawContains);
-    }
+    q = applyRawDataMetaContains(q, {
+      order_source,
+      order_type,
+      shipping_status,
+    });
     if (orderIdsByEmployee) {
       q = applyOrderIdMembershipFilter(q, orderIdsByEmployee);
     }
     return q;
   }
 
-  const pidNeedle = parseProductFilterInput(product_id);
-  const skuNeedle = parseProductFilterInput(product_sku);
   const phoneNeedle = parseProductFilterInput(phone);
   const pPhone = postgrestIlikeStarWrap(phoneNeedle);
 
@@ -514,32 +604,45 @@ async function getWebhookOrders({
     }
   }
 
+  function applyBaseListFiltersAndPhone(q) {
+    let x = applyBaseListFilters(q);
+    if (phoneOrderIds) {
+      x = applyOrderIdMembershipFilter(x, phoneOrderIds);
+    }
+    return x;
+  }
+
+  const pidForProduct = parseProductFilterInput(product_id);
+  const skuForProduct = parseProductFilterInput(product_sku);
+
+  let productCartByUuidOrderIds = null;
+  if (pidForProduct && UUID_LIKE.test(pidForProduct) && !skuForProduct) {
+    productCartByUuidOrderIds =
+      await collectOrderIdsUnionContainsCartProductUuid(
+        pidForProduct,
+        applyBaseListFiltersAndPhone,
+      );
+    if (!productCartByUuidOrderIds.length) {
+      return {
+        page,
+        limit,
+        total: 0,
+        totalPages: 1,
+        data: [],
+      };
+    }
+  }
+
   let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
   query = applyBaseListFilters(query);
   if (phoneOrderIds) {
     query = applyOrderIdMembershipFilter(query, phoneOrderIds);
   }
 
-  if (pidNeedle && skuNeedle) {
-    const p1 = postgrestIlikeStarWrap(pidNeedle);
-    const p2 = postgrestIlikeStarWrap(skuNeedle);
-    if (p1 && p2) {
-      query = query.ilikeAllOf("raw_data->>cart_items", [p1, p2]);
-    }
-  } else if (pidNeedle) {
-    const p = postgrestIlikeStarWrap(pidNeedle);
-    if (p) {
-      query = query.or(
-        `raw_data->>cart_items.ilike.${p},raw_data->>cartItems.ilike.${p}`,
-      );
-    }
-  } else if (skuNeedle) {
-    const p = postgrestIlikeStarWrap(skuNeedle);
-    if (p) {
-      query = query.or(
-        `raw_data->>cart_items.ilike.${p},raw_data->>cartItems.ilike.${p}`,
-      );
-    }
+  if (productCartByUuidOrderIds) {
+    query = applyOrderIdMembershipFilter(query, productCartByUuidOrderIds);
+  } else {
+    query = applyProductCartIlikeFilters(query, { product_id, product_sku });
   }
 
   query = query
@@ -848,18 +951,22 @@ function applyOrderIdMembershipFilter(query, orderIds) {
 }
 
 /**
- * Order counts by status. Optional employeeId = orders that appear in
- * order_status_logs for that employee (changed_by) with from/to on logs.changed_at,
- * OR orders whose raw_data carries that employee (modifier/updated/created/assigned id
- * or email markers), merged and deduped. Unless ignoreEmployeeLogDateRange, logs use
- * the date window; raw_data marker matches are not date-scoped. Without employeeId,
- * from/to apply to orders.created_at.
+ * عدّ الطلبات حسب orders.status مع نفس فلاتر القائمة (موظف، مصدر، نوع، شحن، منتج، حالة).
+ * employeeId: لوجات + علامات raw_data كما في getWebhookOrders.
+ * status: يقيّد الكون إلى طلبات بهذه الحالة فقط (باقي مفاتيح الإحصاء = 0).
+ * from/to: على orders.created_at إلا مع موظف بدون employee_scope حيث تُطبَّق على اللوجات فقط لحساب مجموعة order_id.
  */
 async function getOrdersStatistics({
   employeeId,
   from,
   to,
   ignoreEmployeeLogDateRange = false,
+  order_source,
+  order_type,
+  shipping_status,
+  status: listStatusFilter,
+  product_id,
+  product_sku,
 }) {
   let orderIds = null;
   let filterOrdersByCreatedAtInRange = true;
@@ -914,7 +1021,19 @@ async function getOrdersStatistics({
   const chunks =
     orderIds == null ? [null] : chunkArray(orderIds, IN_CHUNK_SIZE);
 
-  async function countWithChunks(status) {
+  const listStatusFilterNorm =
+    listStatusFilter != null && String(listStatusFilter).trim() !== ""
+      ? String(listStatusFilter).trim()
+      : null;
+
+  async function countWithChunks(dbStatusForKey) {
+    if (
+      listStatusFilterNorm != null &&
+      listStatusFilterNorm !== dbStatusForKey
+    ) {
+      return 0;
+    }
+
     let sum = 0;
     for (const chunk of chunks) {
       let q = supabase
@@ -928,7 +1047,13 @@ async function getOrdersStatistics({
       if (to && filterOrdersByCreatedAtInRange) {
         q = q.lte("created_at", to.toISOString());
       }
-      if (status) q = q.eq("status", status);
+      q = applyRawDataMetaContains(q, {
+        order_source,
+        order_type,
+        shipping_status,
+      });
+      q = applyProductCartIlikeFilters(q, { product_id, product_sku });
+      q = q.eq("status", dbStatusForKey);
 
       const { count, error } = await q;
       if (error) throw new Error(error.message);
@@ -955,6 +1080,15 @@ async function getOrdersStatistics({
     if (to && filterOrdersByCreatedAtInRange) {
       q = q.lte("created_at", to.toISOString());
     }
+    q = applyRawDataMetaContains(q, {
+      order_source,
+      order_type,
+      shipping_status,
+    });
+    q = applyProductCartIlikeFilters(q, { product_id, product_sku });
+    if (listStatusFilterNorm != null) {
+      q = q.eq("status", listStatusFilterNorm);
+    }
 
     const { count, error } = await q;
     if (error) throw new Error(error.message);
@@ -973,12 +1107,256 @@ async function getOrdersStatistics({
   };
 }
 
+const MAX_ANALYTICS_ROWS = 50000;
+
+function analyticsFirstNonEmpty(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    const s = String(value).trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+function parseCartItemsArray(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+  let c = raw.cart_items ?? raw.cartItems;
+  if (c == null) return [];
+  if (typeof c === "string") {
+    try {
+      const p = JSON.parse(c);
+      return Array.isArray(p) ? p : [];
+    } catch {
+      return [];
+    }
+  }
+  return Array.isArray(c) ? c : [];
+}
+
+function sumLineQuantitiesFromRaw(raw) {
+  return parseCartItemsArray(raw).reduce(
+    (s, line) => s + (Number(line?.quantity) || 0),
+    0,
+  );
+}
+
+/** مبيعات الطلب: total_cost ثم cost كبديل */
+function pickOrderTotalCost(raw) {
+  if (!raw || typeof raw !== "object") return 0;
+  const total = Number(raw.total_cost);
+  if (Number.isFinite(total)) return total;
+  const cost = Number(raw.cost);
+  if (Number.isFinite(cost)) return cost;
+  return 0;
+}
+
+function incrementAnalyticsBucket(map, key) {
+  const k =
+    key != null && String(key).trim() !== ""
+      ? String(key).trim()
+      : "__unset";
+  map[k] = (map[k] || 0) + 1;
+}
+
+function aggregateOrdersAnalyticsRows(rows) {
+  const byOrderSource = Object.create(null);
+  const byOrderType = Object.create(null);
+  const byOrderStatus = Object.create(null);
+  const byShippingStatus = Object.create(null);
+  let totalCost = 0;
+  let totalProductUnits = 0;
+
+  for (const row of rows) {
+    const raw =
+      row.raw_data &&
+      typeof row.raw_data === "object" &&
+      !Array.isArray(row.raw_data)
+        ? row.raw_data
+        : {};
+
+    totalCost += pickOrderTotalCost(raw);
+    totalProductUnits += sumLineQuantitiesFromRaw(raw);
+
+    const orderSource = analyticsFirstNonEmpty(
+      raw.order_source,
+      raw.orderSource,
+    );
+    const orderType = analyticsFirstNonEmpty(raw.order_type, raw.orderType);
+    const shippingStatus = analyticsFirstNonEmpty(
+      raw.shipping_status,
+      raw.shippingStatus,
+    );
+    const orderStatus =
+      row.status != null && String(row.status).trim() !== ""
+        ? String(row.status).trim()
+        : "";
+
+    incrementAnalyticsBucket(byOrderSource, orderSource || "__unset");
+    incrementAnalyticsBucket(byOrderType, orderType || "__unset");
+    incrementAnalyticsBucket(byShippingStatus, shippingStatus || "__unset");
+    incrementAnalyticsBucket(byOrderStatus, orderStatus || "__unset");
+  }
+
+  const totalOrders = rows.length;
+  const averageOrderValue =
+    totalOrders > 0 ? totalCost / totalOrders : null;
+  const averageUnitsPerOrder =
+    totalOrders > 0 ? totalProductUnits / totalOrders : null;
+
+  return {
+    totalOrders,
+    totalCost,
+    totalProductUnits,
+    averageUnitsPerOrder,
+    averageOrderValue,
+    byOrderSource,
+    byOrderType,
+    byOrderStatus,
+    byShippingStatus,
+  };
+}
+
+async function fetchAnalyticsOrderRows({
+  product_id,
+  product_sku,
+  employeeId,
+  from,
+  to,
+  ignoreEmployeeLogDateRange = false,
+}) {
+  let orderIdsByEmployee = null;
+
+  if (employeeId) {
+    const changedByKey = await resolveEmployeeToIdForLogs(employeeId);
+    if (String(employeeId).trim().includes("@") && !changedByKey) {
+      return { rows: [], truncated: false };
+    }
+
+    const keyForLogs = changedByKey || String(employeeId).trim();
+
+    const fromLogs = await fetchDistinctOrderIdsFromLogs({
+      changedByKey: keyForLogs,
+      from,
+      to,
+      ignoreDateRange: ignoreEmployeeLogDateRange,
+    });
+    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
+      employeeKey: keyForLogs,
+      employeeRawInput: String(employeeId).trim(),
+    });
+    orderIdsByEmployee = [...new Set([...fromLogs, ...fromRawMarkers])];
+
+    if (!orderIdsByEmployee.length) {
+      return { rows: [], truncated: false };
+    }
+  }
+
+  function applyNonProductFilters(q) {
+    if (from) {
+      q = q.gte("created_at", from.toISOString());
+    }
+    if (to) {
+      q = q.lte("created_at", to.toISOString());
+    }
+    if (orderIdsByEmployee) {
+      q = applyOrderIdMembershipFilter(q, orderIdsByEmployee);
+    }
+    return q;
+  }
+
+  const pidNeedle = parseProductFilterInput(product_id);
+  const skuNeedle = parseProductFilterInput(product_sku);
+
+  let orderIdsByProductUuid = null;
+  if (pidNeedle && UUID_LIKE.test(pidNeedle) && !skuNeedle) {
+    orderIdsByProductUuid = await collectOrderIdsUnionContainsCartProductUuid(
+      pidNeedle,
+      applyNonProductFilters,
+    );
+    if (!orderIdsByProductUuid.length) {
+      return { rows: [], truncated: false };
+    }
+  }
+
+  const rows = [];
+  let truncated = false;
+  let offset = 0;
+
+  for (;;) {
+    if (rows.length >= MAX_ANALYTICS_ROWS) {
+      truncated = true;
+      break;
+    }
+
+    const remaining = MAX_ANALYTICS_ROWS - rows.length;
+    const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+
+    let q = supabase
+      .from(ORDERS_TABLE)
+      .select("order_id,status,raw_data")
+      .order("created_at", { ascending: false });
+
+    q = applyNonProductFilters(q);
+    if (orderIdsByProductUuid) {
+      q = applyOrderIdMembershipFilter(q, orderIdsByProductUuid);
+    } else {
+      q = applyProductCartIlikeFilters(q, { product_id, product_sku });
+    }
+
+    q = q.range(offset, offset + pageSize - 1);
+
+    const { data, error } = await q;
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!data || data.length === 0) {
+      break;
+    }
+    rows.push(...data);
+    if (data.length < pageSize) {
+      break;
+    }
+    offset += pageSize;
+  }
+
+  return { rows, truncated };
+}
+
+/**
+ * تقرير تجميعي: منتج (مطلوب) + موظف + فترة orders.created_at اختيارية.
+ * معرف المنتج: UUID في product_id أو easyorder_id — يُطابق العربة بـ @> بدون الاعتماد على sku.
+ * إن وُجد product_sku مع UUID يُستخدم ilike على JSON (دمج فلاتر).
+ * totalCost = مجموع total_cost أو cost؛
+ * averageUnitsPerOrder = مجموع كميات بنود العربة / عدد الطلبات؛
+ * averageOrderValue = totalCost / totalOrders.
+ */
+async function getOrdersAnalyticsReport({
+  product_id,
+  product_sku,
+  employeeId,
+  from,
+  to,
+  ignoreEmployeeLogDateRange = false,
+}) {
+  const { rows, truncated } = await fetchAnalyticsOrderRows({
+    product_id,
+    product_sku,
+    employeeId,
+    from,
+    to,
+    ignoreEmployeeLogDateRange,
+  });
+  const agg = aggregateOrdersAnalyticsRows(rows);
+  return { ...agg, truncated, maxRowsCap: MAX_ANALYTICS_ROWS };
+}
+
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,
+  getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
   ORDER_TYPES,
