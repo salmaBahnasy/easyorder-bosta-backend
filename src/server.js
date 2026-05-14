@@ -10,6 +10,8 @@ const ordersRoutes = require("./routes/orders.routes");
 const webhooksRoutes = require("./routes/webhooks.routes");
 const employeesRoutes = require("./routes/employees.routes");
 const productsRoutes = require("./routes/products.routes");
+const sallaRoutes = require("./routes/salla.routes");
+const easyorderRoutes = require("./routes/easyorder.routes");
 
 const app = express();
 const port = process.env.PORT || 5050;
@@ -29,7 +31,9 @@ app.get("/", (req, res) => {
 app.use("/api/orders", ordersRoutes);
 app.use("/webhooks", webhooksRoutes);
 app.use("/api/employees", employeesRoutes);
+app.use("/api/easyorder", easyorderRoutes);
 app.use("/api/products", productsRoutes);
+app.use("/api/salla", sallaRoutes);
 
 // start server
 app.listen(port, () => {
