@@ -1,0 +1,434 @@
+{
+  "info": {
+    "_postman_id": "eob-bosta-collection-001",
+    "name": "EasyOrder Bosta Backend",
+    "description": "API collection for easyorder-bosta-backend. Set collection variable `baseUrl` (e.g. https://easyorder-bosta-backend.onrender.com or http://localhost:5050). Use `token` (JWT) for protected routes.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5050" },
+    { "key": "token", "value": "" },
+    { "key": "orderId", "value": "REPLACE_ORDER_ID" },
+    { "key": "employeeId", "value": "REPLACE_EMPLOYEE_UUID" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Root health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Orders (/api/orders)",
+      "item": [
+        {
+          "name": "List orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "orders"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "from", "value": "", "disabled": true },
+                { "key": "to", "value": "", "disabled": true },
+                { "key": "status", "value": "", "disabled": true },
+                { "key": "shipping_status", "value": "", "disabled": true },
+                { "key": "order_source", "value": "", "disabled": true },
+                { "key": "order_type", "value": "", "disabled": true },
+                { "key": "product_id", "value": "", "disabled": true },
+                { "key": "phone", "value": "", "disabled": true },
+                { "key": "employeeId", "value": "", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Orders stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/orders/stats"
+          }
+        },
+        {
+          "name": "Orders analytics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/orders/analytics?product_id=",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "orders", "analytics"],
+              "query": [{ "key": "product_id", "value": "" }]
+            }
+          }
+        },
+        {
+          "name": "Create order (manual)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"manual-order-001\",\n  \"full_name\": \"Customer\",\n  \"phone\": \"01000000000\",\n  \"address\": \"Address\",\n  \"city\": \"Cairo\"\n}"
+            },
+            "url": "{{baseUrl}}/api/orders",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+            },
+            "description": "Optional Bearer fills created_by in raw_data."
+          }
+        },
+        {
+          "name": "Get order by id (EasyOrders proxy)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/orders/{{orderId}}"
+          }
+        },
+        {
+          "name": "Update order",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Updated name\"\n}"
+            },
+            "url": "{{baseUrl}}/api/orders/{{orderId}}"
+          }
+        },
+        {
+          "name": "Change order status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"Confirmed\"\n}"
+            },
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/status"
+          }
+        },
+        {
+          "name": "Send order to Bosta",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/orders/{{orderId}}/send-to-bosta"
+          }
+        }
+      ]
+    },
+    {
+      "name": "EasyOrder frontend alias (/api/easyorder)",
+      "description": "Same handlers as /api/orders, /api/employees, /api/products, /api/salla — different base path for the SPA.",
+      "item": [
+        {
+          "name": "Auth login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password\"\n}"
+            },
+            "url": "{{baseUrl}}/api/easyorder/auth/login"
+          }
+        },
+        {
+          "name": "Orders stats (shortcut)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/easyorder/stats"
+          }
+        },
+        {
+          "name": "Orders analytics (shortcut)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/easyorder/analytics?product_id=",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "easyorder", "analytics"],
+              "query": [{ "key": "product_id", "value": "" }]
+            }
+          }
+        },
+        {
+          "name": "List orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/easyorder/orders?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "easyorder", "orders"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Orders stats (under /orders)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/easyorder/orders/stats"
+          }
+        },
+        {
+          "name": "List employees",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/easyorder/employees"
+          }
+        },
+        {
+          "name": "Employee login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password\"\n}"
+            },
+            "url": "{{baseUrl}}/api/easyorder/employees/login"
+          }
+        },
+        {
+          "name": "List products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/easyorder/products"
+          }
+        },
+        {
+          "name": "Salla — login check",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/easyorder/salla/auth/login"
+          }
+        },
+        {
+          "name": "Salla — orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/easyorder/salla/orders?page=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "easyorder", "salla", "orders"],
+              "query": [{ "key": "page", "value": "1" }]
+            }
+          }
+        },
+        {
+          "name": "Salla — stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/easyorder/salla/stats"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Employees (/api/employees)",
+      "item": [
+        {
+          "name": "Login",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password\"\n}"
+            },
+            "url": "{{baseUrl}}/api/employees/login"
+          }
+        },
+        {
+          "name": "Login (legacy path)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\",\n  \"password\": \"password\"\n}"
+            },
+            "url": "{{baseUrl}}/api/employees/login-senior"
+          }
+        },
+        {
+          "name": "List employees",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/employees"
+          }
+        },
+        {
+          "name": "Create employee",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"New User\",\n  \"email\": \"new@example.com\",\n  \"password\": \"secret\",\n  \"role\": \"employee\"\n}"
+            },
+            "url": "{{baseUrl}}/api/employees"
+          }
+        },
+        {
+          "name": "Update employee",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Updated\"\n}"
+            },
+            "url": "{{baseUrl}}/api/employees/{{employeeId}}"
+          }
+        },
+        {
+          "name": "Set employee active",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"active\": true\n}" },
+            "url": "{{baseUrl}}/api/employees/{{employeeId}}/active"
+          }
+        },
+        {
+          "name": "Delete employee",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": "{{baseUrl}}/api/employees/{{employeeId}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Products (/api/products)",
+      "item": [
+        {
+          "name": "List products",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/products"
+          }
+        },
+        {
+          "name": "Sync products",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/products/sync"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks (/webhooks)",
+      "item": [
+        {
+          "name": "EasyOrder order created",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/webhooks/easyorders/order-created"
+          }
+        },
+        {
+          "name": "List webhook orders (internal)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/easyorders/orders?raw=false",
+              "host": ["{{baseUrl}}"],
+              "path": ["webhooks", "easyorders", "orders"],
+              "query": [{ "key": "raw", "value": "false" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Salla (/api/salla)",
+      "item": [
+        {
+          "name": "Auth login (verify token)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/salla/auth/login"
+          }
+        },
+        {
+          "name": "Auth login (alias)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/salla/login"
+          }
+        },
+        {
+          "name": "Salla orders",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/salla/orders?page=1",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "salla", "orders"],
+              "query": [{ "key": "page", "value": "1" }]
+            }
+          }
+        },
+        {
+          "name": "Salla stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/salla/stats"
+          }
+        }
+      ]
+    }
+  ]
+}
