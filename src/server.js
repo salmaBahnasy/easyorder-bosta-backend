@@ -12,6 +12,7 @@ const employeesRoutes = require("./routes/employees.routes");
 const productsRoutes = require("./routes/products.routes");
 const sallaRoutes = require("./routes/salla.routes");
 const easyorderRoutes = require("./routes/easyorder.routes");
+const bostaRoutes = require("./routes/bosta.routes");
 
 const app = express();
 const port = process.env.PORT || 5050;
@@ -34,6 +35,7 @@ app.use("/api/employees", employeesRoutes);
 app.use("/api/easyorder", easyorderRoutes);
 app.use("/api/products", productsRoutes);
 app.use("/api/salla", sallaRoutes);
+app.use("/api/bosta", bostaRoutes);
 
 // start server
 app.listen(port, () => {

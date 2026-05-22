@@ -9,10 +9,12 @@ const {
   sendOrderToBosta,
   getEasyOrderDetails,
   getOrdersStats,
+  getOrdersStatsTrend,
   getOrdersAnalytics,
 } = require("../controllers/orders.controller");
 const { requireAuth, optionalAuth } = require("../middlewares/auth.middleware");
 
+router.get("/stats/trend", getOrdersStatsTrend);
 router.get("/stats", getOrdersStats);
 router.get("/analytics", getOrdersAnalytics);
 router.post("/", optionalAuth, createOrder);

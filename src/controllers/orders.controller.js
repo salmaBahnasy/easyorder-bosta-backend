@@ -6,11 +6,13 @@ const {
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,
+  getOrdersStatsTimeSeries,
   getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
   ORDER_TYPES,
   SHIPPING_STATUSES,
+  getOrdersFilterLists,
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
 
@@ -222,6 +224,7 @@ async function getOrders(req, res) {
         queryReceived: shallowQueryEcho(req),
       },
       appliedFilters,
+      filterLists: getOrdersFilterLists(),
       listOrdersQueryReference:
         "GET /api/orders?... phone|mobile|customer_phone filters raw_data. employeeId|employee_id (UUID or email). employee_scope=all|any|all_time: with employee, from/to apply to activity logs only. Without employee_scope: from/to on order_status_logs.changed_at. Without employee: from/to on orders.created_at. product_id or easyorder_id (UUID): cart match via @> (no SKU required).",
       ...result,
@@ -637,6 +640,7 @@ async function getOrdersStats(req, res) {
         product_sku: product_sku || null,
       },
       stats: statsWithLegacyKeys,
+      filterLists: getOrdersFilterLists(),
     });
   } catch (error) {
     res.status(500).json({
@@ -651,6 +655,143 @@ async function getOrdersStats(req, res) {
  * GET /api/orders/analytics — aggregated report: required product (UUID), optional
  * employee, optional created_at range.
  */
+/**
+ * GET /api/orders/stats/trend — time-series for charts (5 KPIs per bucket).
+ * Default from/to: current calendar month. Same filters as /stats (employee, product, meta).
+ */
+async function getOrdersStatsTrend(req, res) {
+  try {
+    const defaultRange = getDefaultDateRange();
+
+    const employeeId = normalizeQueryId(
+      req.query.employeeId || req.query.userId || req.query.employee_id,
+    );
+    const employee_scope = normalizeQueryId(
+      req.query.employee_scope || req.query.employeeScope,
+    );
+    const ignoreEmployeeLogDateRange =
+      employee_scope === "all" ||
+      employee_scope === "any" ||
+      employee_scope === "all_time";
+
+    const status = optionalQueryParam(req.query.status);
+    const order_source = optionalQueryParam(
+      req.query.order_source || req.query.orderSource,
+    );
+    const order_type = optionalQueryParam(
+      req.query.order_type || req.query.orderType,
+    );
+    const shipping_status = optionalQueryParam(
+      req.query.shipping_status || req.query.shippingStatus,
+    );
+    const easyorder_id = optionalQueryParam(
+      req.query.easyorder_id || req.query.easyorderId,
+    );
+    const product_id =
+      optionalQueryParam(req.query.product_id || req.query.productId) ||
+      easyorder_id;
+    const product_sku = optionalQueryParam(
+      req.query.product_sku || req.query.productSku,
+    );
+
+    const granRaw = optionalQueryParam(req.query.granularity);
+    const granularity =
+      granRaw === "week" || granRaw === "month" ? granRaw : "day";
+
+    if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid status filter",
+        allowedStatuses: ALLOWED_ORDER_STATUSES,
+      });
+      return;
+    }
+
+    if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid order_source filter",
+        allowedOrderSources: ORDER_SOURCES,
+      });
+      return;
+    }
+
+    if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid order_type filter",
+        allowedOrderTypes: ORDER_TYPES,
+      });
+      return;
+    }
+
+    if (
+      shipping_status &&
+      !SHIPPING_STATUSES.includes(String(shipping_status).trim())
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid shipping_status filter",
+        allowedShippingStatuses: SHIPPING_STATUSES,
+      });
+      return;
+    }
+
+    let from = req.query.from ? new Date(req.query.from) : defaultRange.from;
+    let to = req.query.to ? new Date(req.query.to) : defaultRange.to;
+
+    if (Number.isNaN(from.getTime())) {
+      res.status(400).json({ success: false, message: "Invalid from date" });
+      return;
+    }
+    if (Number.isNaN(to.getTime())) {
+      res.status(400).json({ success: false, message: "Invalid to date" });
+      return;
+    }
+
+    const chart = await getOrdersStatsTimeSeries({
+      from,
+      to,
+      granularity,
+      employeeId,
+      ignoreEmployeeLogDateRange,
+      order_source,
+      order_type,
+      shipping_status,
+      status,
+      product_id,
+      product_sku,
+    });
+
+    res.json({
+      success: true,
+      filters: {
+        employeeId,
+        employee_scope: employee_scope || null,
+        ignoreEmployeeLogDateRange,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity,
+        status: status || null,
+        order_source: order_source || null,
+        order_type: order_type || null,
+        shipping_status: shipping_status || null,
+        product_id: product_id || null,
+        easyorder_id: easyorder_id || null,
+        product_sku: product_sku || null,
+      },
+      chart,
+      filterLists: getOrdersFilterLists(),
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to build orders stats trend",
+      error: error.message,
+    });
+  }
+}
+
 async function getOrdersAnalytics(req, res) {
   try {
     const easyorder_id = optionalQueryParam(
@@ -765,5 +906,6 @@ module.exports = {
   sendOrderToBosta,
   getEasyOrderDetails,
   getOrdersStats,
+  getOrdersStatsTrend,
   getOrdersAnalytics,
 };

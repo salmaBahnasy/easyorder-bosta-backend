@@ -12,14 +12,70 @@ const ALLOWED_ORDER_STATUSES = [
   "Shipped",
 ];
 
-/** مصدر الطلب: store=المتجر (تلقائي من الويب هوك), messenger, whatsapp, lost_order=طلب مفقود */
-const ORDER_SOURCES = ["store", "messenger", "whatsapp", "lost_order"];
+/** مصدر الطلب — قيم + تسميات للواجهة */
+const ORDER_SOURCE_OPTIONS = [
+  { value: "store", labelAr: "المتجر" },
+  { value: "messenger", labelAr: "ماسنجر" },
+  { value: "whatsapp", labelAr: "واتساب" },
+  { value: "lost_order", labelAr: "طلب مفقود" },
+  { value: "old_customer", labelAr: "عميل قديم" },
+];
 
-/** نوع الطلب: new=جديد (افتراضي), replacement=استبدال, return=استرجاع */
-const ORDER_TYPES = ["new", "replacement", "return"];
+const ORDER_SOURCES = ORDER_SOURCE_OPTIONS.map((o) => o.value);
 
-/** حالة الشحن: in_progress=قيد التنفيذ, delivered=تم بنجاح, failed=فشل التوصيل */
-const SHIPPING_STATUSES = ["in_progress", "delivered", "failed"];
+/** نوع الطلب */
+const ORDER_TYPE_OPTIONS = [
+  { value: "new", labelAr: "جديد" },
+  { value: "replacement", labelAr: "استبدال" },
+  { value: "return", labelAr: "استرجاع" },
+];
+
+const ORDER_TYPES = ORDER_TYPE_OPTIONS.map((o) => o.value);
+
+/** حالة الشحن */
+const SHIPPING_STATUS_OPTIONS = [
+  { value: "in_progress", labelAr: "قيد التنفيذ" },
+  { value: "delivered", labelAr: "تم التوصيل" },
+  { value: "failed", labelAr: "فشل التوصيل" },
+];
+
+const SHIPPING_STATUSES = SHIPPING_STATUS_OPTIONS.map((o) => o.value);
+
+const ORDER_STATUS_OPTIONS = [
+  { value: "new", labelAr: "جديد" },
+  { value: "Confirmed", labelAr: "مؤكد" },
+  { value: "Shipped", labelAr: "تم الشحن" },
+  { value: "canceled", labelAr: "ملغي" },
+  { value: "no_replay", labelAr: "لا رد" },
+  { value: "follow up", labelAr: "متابعة" },
+  { value: "repeater", labelAr: "مكرر" },
+];
+
+/** قوائم الفلاتر للواجهة (قائمة الطلبات / الإحصائيات) */
+function getOrdersFilterLists() {
+  return {
+    orderSource: {
+      key: "order_source",
+      labelAr: "مصدر الطلب",
+      options: ORDER_SOURCE_OPTIONS,
+    },
+    orderType: {
+      key: "order_type",
+      labelAr: "نوع الطلب",
+      options: ORDER_TYPE_OPTIONS,
+    },
+    shippingStatus: {
+      key: "shipping_status",
+      labelAr: "حالة الشحن",
+      options: SHIPPING_STATUS_OPTIONS,
+    },
+    orderStatus: {
+      key: "status",
+      labelAr: "حالة الطلب",
+      options: ORDER_STATUS_OPTIONS,
+    },
+  };
+}
 
 function pickMetaField(payload, snakeKey, camelKey) {
   if (!payload || typeof payload !== "object") return undefined;
@@ -1078,6 +1134,10 @@ function buildEmptyStatsBreakdownResponse() {
   };
   return {
     totalOrders: 0,
+    total: 0,
+    totalProductUnits: 0,
+    averageUnitsPerOrder: null,
+    averageOrderValue: null,
     canceled: 0,
     no_replay: 0,
     follow_up: 0,
@@ -1377,8 +1437,66 @@ async function getOrdersStatistics({
     repeaterOrders: byStatus.repeater,
   };
 
+  const productIdForUnitSum =
+    pidForStats && UUID_LIKE.test(pidForStats) ? pidForStats : null;
+
+  let totalProductUnits = 0;
+  let total = 0;
+  for (const chunk of chunks) {
+    let offset = 0;
+    for (;;) {
+      let q = supabase.from(ORDERS_TABLE).select("raw_data");
+      const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
+      if (scoped.skip) break;
+      q = scoped.nextQ;
+
+      if (from && filterOrdersByCreatedAtInRange) {
+        q = q.gte("created_at", from.toISOString());
+      }
+      if (to && filterOrdersByCreatedAtInRange) {
+        q = q.lte("created_at", to.toISOString());
+      }
+      q = applyStatsRawContains(q, null, null);
+      if (statsProductOrderIds == null) {
+        q = applyProductCartIlikeFilters(q, { product_id, product_sku });
+      }
+      if (listStatusFilterNorm != null) {
+        q = q.eq("status", listStatusFilterNorm);
+      }
+
+      q = q.range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+      const { data, error } = await q;
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+
+      for (const row of data) {
+        const raw =
+          row.raw_data &&
+          typeof row.raw_data === "object" &&
+          !Array.isArray(row.raw_data)
+            ? row.raw_data
+            : {};
+        totalProductUnits += sumLineQuantitiesFromRaw(raw, {
+          productIdFilter: productIdForUnitSum,
+        });
+        total += pickOrderTotalCost(raw);
+      }
+
+      if (data.length < LOG_SELECT_PAGE_SIZE) break;
+      offset += LOG_SELECT_PAGE_SIZE;
+    }
+  }
+
+  const averageUnitsPerOrder =
+    totalOrders > 0 ? totalProductUnits / totalOrders : null;
+  const averageOrderValue = totalOrders > 0 ? total / totalOrders : null;
+
   return {
     totalOrders,
+    total,
+    totalProductUnits,
+    averageUnitsPerOrder,
+    averageOrderValue,
     canceled: byStatus.canceled,
     no_replay: byStatus.no_replay,
     follow_up: byStatus.follow_up,
@@ -1426,14 +1544,62 @@ function parseCartItemsArray(raw) {
   return Array.isArray(c) ? c : [];
 }
 
-function sumLineQuantitiesFromRaw(raw) {
-  return parseCartItemsArray(raw).reduce(
-    (s, line) => s + (Number(line?.quantity) || 0),
-    0,
+/** quantity غالبًا على السطر أو داخل product (أو variant). */
+function pickLineQuantity(line) {
+  if (!line || typeof line !== "object") return 0;
+  const product =
+    line.product && typeof line.product === "object" ? line.product : {};
+  const variant =
+    line.variant && typeof line.variant === "object" ? line.variant : {};
+  const candidates = [
+    product.quantity,
+    line.quantity,
+    variant.quantity,
+    product.qty,
+    line.qty,
+  ];
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n)) return Math.max(0, n);
+  }
+  return 0;
+}
+
+function lineMatchesProductIdFilter(line, productIdFilter) {
+  if (!productIdFilter) return true;
+  const needle = String(productIdFilter).trim().toLowerCase();
+  if (!needle) return true;
+  const product =
+    line?.product && typeof line.product === "object" ? line.product : {};
+  const candidates = [
+    line?.product_id,
+    line?.productId,
+    line?.id,
+    line?.easyorder_id,
+    product?.id,
+    product?.product_id,
+    product?.productId,
+    product?.easyorder_id,
+    product?.easyorderId,
+  ];
+  return candidates.some(
+    (c) => c != null && String(c).trim().toLowerCase() === needle,
   );
 }
 
-/** مبيعات الطلب: total_cost ثم cost كبديل */
+/**
+ * إجمالي القطع = مجموع quantity لأسطر cart_items (من السطر أو product.quantity).
+ * @param {{ productIdFilter?: string }} options — عند فلتر منتج UUID نجمع أسطر ذلك المنتج فقط.
+ */
+function sumLineQuantitiesFromRaw(raw, options = {}) {
+  const { productIdFilter } = options;
+  return parseCartItemsArray(raw).reduce((s, line) => {
+    if (!lineMatchesProductIdFilter(line, productIdFilter)) return s;
+    return s + pickLineQuantity(line);
+  }, 0);
+}
+
+/** مبيعات الطلب الواحد — نفس منطق `total` في قائمة الطلبات: total_cost ثم cost */
 function pickOrderTotalCost(raw) {
   if (!raw || typeof raw !== "object") return 0;
   const total = Number(raw.total_cost);
@@ -1451,7 +1617,8 @@ function incrementAnalyticsBucket(map, key) {
   map[k] = (map[k] || 0) + 1;
 }
 
-function aggregateOrdersAnalyticsRows(rows) {
+function aggregateOrdersAnalyticsRows(rows, options = {}) {
+  const { productIdFilter = null } = options;
   const byOrderSource = Object.create(null);
   const byOrderType = Object.create(null);
   const byOrderStatus = Object.create(null);
@@ -1468,7 +1635,7 @@ function aggregateOrdersAnalyticsRows(rows) {
         : {};
 
     totalCost += pickOrderTotalCost(raw);
-    totalProductUnits += sumLineQuantitiesFromRaw(raw);
+    totalProductUnits += sumLineQuantitiesFromRaw(raw, { productIdFilter });
 
     const orderSource = analyticsFirstNonEmpty(
       raw.order_source,
@@ -1638,8 +1805,373 @@ async function getOrdersAnalyticsReport({
     to,
     ignoreEmployeeLogDateRange,
   });
-  const agg = aggregateOrdersAnalyticsRows(rows);
+  const pid = normalizeProductIdForCartFilter(product_id);
+  const productIdForUnitSum =
+    pid && UUID_LIKE.test(pid) && !parseProductFilterInput(product_sku)
+      ? pid
+      : null;
+  const agg = aggregateOrdersAnalyticsRows(rows, {
+    productIdFilter: productIdForUnitSum,
+  });
   return { ...agg, truncated, maxRowsCap: MAX_ANALYTICS_ROWS };
+}
+
+const MAX_TREND_ROWS = 50000;
+
+function emptyTrendBucket() {
+  return {
+    totalOrders: 0,
+    total: 0,
+    totalProductUnits: 0,
+    averageUnitsPerOrder: null,
+    averageOrderValue: null,
+  };
+}
+
+function finalizeTrendBucket(bucket) {
+  const averageUnitsPerOrder =
+    bucket.totalOrders > 0 ? bucket.totalProductUnits / bucket.totalOrders : null;
+  const averageOrderValue =
+    bucket.totalOrders > 0 ? bucket.total / bucket.totalOrders : null;
+  return {
+    totalOrders: bucket.totalOrders,
+    total: bucket.total,
+    totalProductUnits: bucket.totalProductUnits,
+    averageUnitsPerOrder,
+    averageOrderValue,
+  };
+}
+
+/** مفتاح التجميع للرسم البياني: يوم / أسبوع (بداية الاثنين UTC) / شهر */
+function bucketKeyFromDate(date, granularity) {
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return null;
+
+  if (granularity === "month") {
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    return `${y}-${m}`;
+  }
+
+  if (granularity === "week") {
+    const day = d.getUTCDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() + diff);
+    monday.setUTCHours(0, 0, 0, 0);
+    return monday.toISOString().slice(0, 10);
+  }
+
+  return d.toISOString().slice(0, 10);
+}
+
+function listTrendBucketKeys(from, to, granularity) {
+  const keys = [];
+  const cur = new Date(from);
+  cur.setUTCHours(0, 0, 0, 0);
+  const end = new Date(to);
+  end.setUTCHours(23, 59, 59, 999);
+
+  if (granularity === "day") {
+    while (cur <= end) {
+      keys.push(cur.toISOString().slice(0, 10));
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
+    return keys;
+  }
+
+  if (granularity === "week") {
+    while (cur <= end) {
+      const k = bucketKeyFromDate(cur, "week");
+      if (k && !keys.includes(k)) keys.push(k);
+      cur.setUTCDate(cur.getUTCDate() + 7);
+    }
+    return keys;
+  }
+
+  if (granularity === "month") {
+    const seen = new Set();
+    const walk = new Date(cur);
+    while (walk <= end) {
+      const k = bucketKeyFromDate(walk, "month");
+      if (k && !seen.has(k)) {
+        seen.add(k);
+        keys.push(k);
+      }
+      walk.setUTCMonth(walk.getUTCMonth() + 1);
+    }
+    return keys;
+  }
+
+  return keys;
+}
+
+/**
+ * Time-series for charts: same filters as GET /stats, bucketed by day (default), week, or month.
+ * Default range when from/to omitted: caller should pass current month (see controller).
+ */
+async function getOrdersStatsTimeSeries({
+  from,
+  to,
+  granularity = "day",
+  employeeId,
+  ignoreEmployeeLogDateRange = false,
+  order_source,
+  order_type,
+  shipping_status,
+  status: listStatusFilter,
+  product_id,
+  product_sku,
+}) {
+  const gran =
+    granularity === "week" || granularity === "month" ? granularity : "day";
+
+  let orderIds = null;
+  let filterOrdersByCreatedAtInRange = true;
+
+  const employeeKey =
+    typeof employeeId === "string" ? employeeId.trim() : employeeId;
+
+  if (employeeKey) {
+    const changedByKey = await resolveEmployeeToIdForLogs(employeeKey);
+    if (String(employeeKey).includes("@") && !changedByKey) {
+      return {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity: gran,
+        points: listTrendBucketKeys(from, to, gran).map((date) => ({
+          date,
+          ...emptyTrendBucket(),
+        })),
+        summary: emptyTrendBucket(),
+        truncated: false,
+      };
+    }
+
+    const keyForLogs = changedByKey || String(employeeKey);
+    const fromLogs = await fetchDistinctOrderIdsFromLogs({
+      changedByKey: keyForLogs,
+      from,
+      to,
+      ignoreDateRange: ignoreEmployeeLogDateRange,
+    });
+    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
+      employeeKey: keyForLogs,
+      employeeRawInput: String(employeeKey).trim(),
+    });
+    orderIds = [...new Set([...fromLogs, ...fromRawMarkers])];
+    filterOrdersByCreatedAtInRange = false;
+
+    if (!orderIds.length) {
+      return {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity: gran,
+        points: listTrendBucketKeys(from, to, gran).map((date) => ({
+          date,
+          ...emptyTrendBucket(),
+        })),
+        summary: emptyTrendBucket(),
+        truncated: false,
+      };
+    }
+  }
+
+  const chunks =
+    orderIds == null ? [null] : chunkArray(orderIds, IN_CHUNK_SIZE);
+
+  const listStatusFilterNorm =
+    listStatusFilter != null && String(listStatusFilter).trim() !== ""
+      ? String(listStatusFilter).trim()
+      : null;
+
+  function applyStatsRawContains(query, breakdownDim, breakdownValue) {
+    let q = query;
+    const effectiveOrderSource =
+      breakdownDim === "order_source"
+        ? breakdownValue
+        : order_source || null;
+    const effectiveOrderType =
+      breakdownDim === "order_type" ? breakdownValue : order_type || null;
+    const effectiveShipping =
+      breakdownDim === "shipping_status"
+        ? breakdownValue
+        : shipping_status || null;
+    if (effectiveOrderSource) {
+      q = applyRawDataOrderSourceContainsOr(q, effectiveOrderSource);
+    }
+    if (effectiveOrderType) {
+      q = applyRawDataOrderTypeContainsOr(q, effectiveOrderType);
+    }
+    if (effectiveShipping) {
+      q = applyRawDataShippingStatusContainsOr(q, effectiveShipping);
+    }
+    return q;
+  }
+
+  let statsProductOrderIds = null;
+  const pidForStats = normalizeProductIdForCartFilter(product_id);
+  const skuForStats = parseProductFilterInput(product_sku);
+  if (pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats) {
+    async function applyStatsBaseForProductUuidCollect(q) {
+      let x = q;
+      if (from && filterOrdersByCreatedAtInRange) {
+        x = x.gte("created_at", from.toISOString());
+      }
+      if (to && filterOrdersByCreatedAtInRange) {
+        x = x.lte("created_at", to.toISOString());
+      }
+      x = applyStatsRawContains(x, null, null);
+      if (orderIds != null && orderIds.length) {
+        x = applyOrderIdMembershipFilter(x, orderIds);
+      }
+      return x;
+    }
+    statsProductOrderIds = await collectOrderIdsUnionContainsCartProductUuid(
+      pidForStats,
+      applyStatsBaseForProductUuidCollect,
+    );
+    if (!statsProductOrderIds.length) {
+      return {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity: gran,
+        points: listTrendBucketKeys(from, to, gran).map((date) => ({
+          date,
+          ...emptyTrendBucket(),
+        })),
+        summary: emptyTrendBucket(),
+        truncated: false,
+      };
+    }
+  }
+
+  function applyStatsOrderChunkAndProductFilter(q, chunk) {
+    if (statsProductOrderIds != null && statsProductOrderIds.length) {
+      const pset = new Set(statsProductOrderIds.map(String));
+      if (chunk && chunk.length) {
+        const merged = chunk.filter((id) => pset.has(String(id)));
+        if (!merged.length) return { nextQ: q, skip: true };
+        return {
+          nextQ: applyOrderIdMembershipFilter(q, merged),
+          skip: false,
+        };
+      }
+      return {
+        nextQ: applyOrderIdMembershipFilter(q, statsProductOrderIds),
+        skip: false,
+      };
+    }
+    if (chunk && chunk.length) {
+      return { nextQ: q.in("order_id", chunk), skip: false };
+    }
+    return { nextQ: q, skip: false };
+  }
+
+  const productIdForUnitSum =
+    pidForStats && UUID_LIKE.test(pidForStats) ? pidForStats : null;
+
+  const bucketMap = new Map();
+  let rowCount = 0;
+  let truncated = false;
+
+  for (const chunk of chunks) {
+    let offset = 0;
+    for (;;) {
+      if (rowCount >= MAX_TREND_ROWS) {
+        truncated = true;
+        break;
+      }
+
+      let q = supabase.from(ORDERS_TABLE).select("created_at,raw_data");
+      const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
+      if (scoped.skip) break;
+      q = scoped.nextQ;
+
+      if (from && filterOrdersByCreatedAtInRange) {
+        q = q.gte("created_at", from.toISOString());
+      }
+      if (to && filterOrdersByCreatedAtInRange) {
+        q = q.lte("created_at", to.toISOString());
+      }
+      q = applyStatsRawContains(q, null, null);
+      if (statsProductOrderIds == null) {
+        q = applyProductCartIlikeFilters(q, { product_id, product_sku });
+      }
+      if (listStatusFilterNorm != null) {
+        q = q.eq("status", listStatusFilterNorm);
+      }
+
+      const remaining = MAX_TREND_ROWS - rowCount;
+      const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+      q = q.range(offset, offset + pageSize - 1);
+
+      const { data, error } = await q;
+      if (error) throw new Error(error.message);
+      if (!data || data.length === 0) break;
+
+      for (const row of data) {
+        rowCount += 1;
+        const key = bucketKeyFromDate(row.created_at, gran);
+        if (!key) continue;
+
+        if (!bucketMap.has(key)) {
+          bucketMap.set(key, {
+            totalOrders: 0,
+            total: 0,
+            totalProductUnits: 0,
+          });
+        }
+        const b = bucketMap.get(key);
+        const raw =
+          row.raw_data &&
+          typeof row.raw_data === "object" &&
+          !Array.isArray(row.raw_data)
+            ? row.raw_data
+            : {};
+
+        b.totalOrders += 1;
+        b.total += pickOrderTotalCost(raw);
+        b.totalProductUnits += sumLineQuantitiesFromRaw(raw, {
+          productIdFilter: productIdForUnitSum,
+        });
+      }
+
+      if (data.length < pageSize) break;
+      offset += pageSize;
+    }
+    if (truncated) break;
+  }
+
+  const points = listTrendBucketKeys(from, to, gran).map((date) => {
+    const b = bucketMap.get(date) || {
+      totalOrders: 0,
+      total: 0,
+      totalProductUnits: 0,
+    };
+    return { date, ...finalizeTrendBucket(b) };
+  });
+
+  const summary = finalizeTrendBucket(
+    points.reduce(
+      (acc, p) => ({
+        totalOrders: acc.totalOrders + p.totalOrders,
+        total: acc.total + p.total,
+        totalProductUnits: acc.totalProductUnits + p.totalProductUnits,
+      }),
+      { totalOrders: 0, total: 0, totalProductUnits: 0 },
+    ),
+  );
+
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    granularity: gran,
+    points,
+    summary,
+    truncated,
+    maxRowsCap: MAX_TREND_ROWS,
+  };
 }
 
 module.exports = {
@@ -1648,9 +2180,15 @@ module.exports = {
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,
+  getOrdersStatsTimeSeries,
   getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
+  ORDER_SOURCE_OPTIONS,
   ORDER_TYPES,
+  ORDER_TYPE_OPTIONS,
   SHIPPING_STATUSES,
+  SHIPPING_STATUS_OPTIONS,
+  ORDER_STATUS_OPTIONS,
+  getOrdersFilterLists,
 };
