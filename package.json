@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "delete-all-orders": "node scripts/delete-all-orders.js"
+    "delete-all-orders": "node scripts/delete-all-orders.js",
+    "bosta-locations:sql": "node scripts/setup-bosta-locations-tables.js"
   },
   "keywords": [],
   "author": "",

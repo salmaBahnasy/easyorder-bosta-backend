@@ -1,4 +1,6 @@
--- Run in Supabase SQL editor (once). Stores Bosta cities & districts with same IDs as Bosta API.
+-- Run once in Supabase Dashboard → SQL → New query → Run
+-- Project: same as SUPABASE_URL (e.g. fibzwecpimtvdnufxflt)
+-- Then: POST /api/easyorder/bosta/locations/sync
 
 create table if not exists public.bosta_cities (
   id text primary key,
@@ -32,3 +34,6 @@ create table if not exists public.bosta_districts (
 );
 
 create index if not exists bosta_districts_city_id_idx on public.bosta_districts (city_id);
+
+-- Refresh PostgREST schema cache so the API sees new tables immediately
+notify pgrst, 'reload schema';
