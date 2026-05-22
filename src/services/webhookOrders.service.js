@@ -1293,7 +1293,12 @@ async function getOrdersStatistics({
     return { nextQ: q, skip: false };
   }
 
-  async function countAggregatedOrders(breakdownDim, breakdownValue) {
+  async function countAggregatedOrders(
+    breakdownDim,
+    breakdownValue,
+    options = {},
+  ) {
+    const { onlyOrderStatus } = options;
     let sum = 0;
     for (const chunk of chunks) {
       let q = supabase
@@ -1314,7 +1319,9 @@ async function getOrdersStatistics({
       if (statsProductOrderIds == null) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
-      if (listStatusFilterNorm != null) {
+      if (onlyOrderStatus) {
+        q = q.eq("status", onlyOrderStatus);
+      } else if (listStatusFilterNorm != null) {
         q = q.eq("status", listStatusFilterNorm);
       }
 
@@ -1406,12 +1413,14 @@ async function getOrdersStatistics({
     byOrderType[typ] = await countAggregatedOrders("order_type", typ);
   }
 
+  /** حالة الشحن في raw_data تُفترض in_progress عند الإنشاء — نحسبها فقط للطلبات المشحونة (status=Shipped). */
   const byShippingStatus = {};
   if (byStatus.Shipped > 0) {
     for (const sh of SHIPPING_STATUSES) {
       byShippingStatus[sh] = await countAggregatedOrders(
         "shipping_status",
         sh,
+        { onlyOrderStatus: "Shipped" },
       );
     }
   } else {
@@ -1664,7 +1673,9 @@ function aggregateOrdersAnalyticsRows(rows, options = {}) {
 
     incrementAnalyticsBucket(byOrderSource, orderSource || "__unset");
     incrementAnalyticsBucket(byOrderType, orderType || "__unset");
-    incrementAnalyticsBucket(byShippingStatus, shippingStatus || "__unset");
+    if (orderStatus === "Shipped") {
+      incrementAnalyticsBucket(byShippingStatus, shippingStatus || "__unset");
+    }
     incrementAnalyticsBucket(byOrderStatus, orderStatus || "__unset");
   }
 
