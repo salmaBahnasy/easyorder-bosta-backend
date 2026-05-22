@@ -7,6 +7,28 @@ const BOSTA_CITIES_TABLE =
 const BOSTA_DISTRICTS_TABLE =
   process.env.SUPABASE_BOSTA_DISTRICTS_TABLE || "bosta_districts";
 
+const BOSTA_LOCATIONS_SETUP_HINT =
+  "Run supabase/bosta_locations_schema.sql in Supabase SQL editor, then POST /api/bosta/locations/sync (or /api/easyorder/bosta/locations/sync).";
+
+function isMissingBostaLocationsTableError(message) {
+  const m = String(message || "");
+  return (
+    m.includes("bosta_cities") ||
+    m.includes("bosta_districts") ||
+    m.includes("schema cache")
+  );
+}
+
+function enrichBostaDbError(error) {
+  if (!error?.message || !isMissingBostaLocationsTableError(error.message)) {
+    return error;
+  }
+  const err = new Error(error.message);
+  err.code = "BOSTA_LOCATIONS_NOT_CONFIGURED";
+  err.setupHint = BOSTA_LOCATIONS_SETUP_HINT;
+  return err;
+}
+
 function getBostaV2BaseUrl() {
   const base = (bosta.baseUrl || "https://app.bosta.co/api").replace(/\/$/, "");
   return base.endsWith("/v2") ? base : `${base}/v2`;
@@ -191,7 +213,7 @@ async function syncBostaLocationsFromApi() {
     .from(BOSTA_CITIES_TABLE)
     .upsert(cityRows, { onConflict: "id" });
   if (cityErr) {
-    throw new Error(cityErr.message);
+    throw enrichBostaDbError(cityErr);
   }
 
   let districtsSynced = 0;
@@ -238,7 +260,7 @@ async function getCitiesFromDb() {
     .order("name_ar", { ascending: true, nullsFirst: false });
 
   if (error) {
-    throw new Error(error.message);
+    throw enrichBostaDbError(error);
   }
 
   const list = (data || []).map(mapCityRowToBostaShape).filter(Boolean);
@@ -264,7 +286,7 @@ async function getDistrictsFromDb(cityId) {
     .order("district_other_name", { ascending: true, nullsFirst: false });
 
   if (error) {
-    throw new Error(error.message);
+    throw enrichBostaDbError(error);
   }
 
   const districts = (data || []).map(mapDistrictRowToBostaShape).filter(Boolean);

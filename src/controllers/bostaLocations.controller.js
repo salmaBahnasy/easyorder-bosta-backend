@@ -13,6 +13,16 @@ async function syncLocations(req, res) {
       data: result,
     });
   } catch (error) {
+    if (error.code === "BOSTA_LOCATIONS_NOT_CONFIGURED") {
+      res.status(503).json({
+        success: false,
+        message: "Bosta locations tables are not set up in Supabase",
+        code: error.code,
+        error: error.message,
+        setupHint: error.setupHint,
+      });
+      return;
+    }
     if (error.code === "BOSTA_HTTP_ERROR") {
       res.status(error.status >= 400 && error.status < 600 ? error.status : 502).json({
         success: false,
@@ -35,6 +45,16 @@ async function listCities(req, res) {
     const payload = await getCitiesFromDb();
     res.json(payload);
   } catch (error) {
+    if (error.code === "BOSTA_LOCATIONS_NOT_CONFIGURED") {
+      res.status(503).json({
+        success: false,
+        message: "Bosta locations tables are not set up in Supabase",
+        code: error.code,
+        error: error.message,
+        setupHint: error.setupHint,
+      });
+      return;
+    }
     res.status(500).json({
       success: false,
       message: "Failed to fetch cities",
@@ -53,6 +73,16 @@ async function listDistricts(req, res) {
       res.status(400).json({
         success: false,
         message: error.message,
+      });
+      return;
+    }
+    if (error.code === "BOSTA_LOCATIONS_NOT_CONFIGURED") {
+      res.status(503).json({
+        success: false,
+        message: "Bosta locations tables are not set up in Supabase",
+        code: error.code,
+        error: error.message,
+        setupHint: error.setupHint,
       });
       return;
     }

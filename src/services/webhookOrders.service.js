@@ -1544,23 +1544,34 @@ function parseCartItemsArray(raw) {
   return Array.isArray(c) ? c : [];
 }
 
-/** quantity غالبًا على السطر أو داخل product (أو variant). */
+/**
+ * كمية السطر في الطلب — من السطر أو الـ variant فقط.
+ * لا نستخدم product.quantity: في EasyOrder هو مخزون المنتج (stock) وليس كمية الطلب.
+ */
 function pickLineQuantity(line) {
   if (!line || typeof line !== "object") return 0;
-  const product =
-    line.product && typeof line.product === "object" ? line.product : {};
   const variant =
     line.variant && typeof line.variant === "object" ? line.variant : {};
   const candidates = [
-    product.quantity,
     line.quantity,
-    variant.quantity,
-    product.qty,
     line.qty,
+    line.count,
+    variant.quantity,
+    variant.qty,
+    variant.count,
   ];
   for (const c of candidates) {
     const n = Number(c);
-    if (Number.isFinite(n)) return Math.max(0, n);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  if (
+    line.product_id != null ||
+    line.productId != null ||
+    (line.product &&
+      typeof line.product === "object" &&
+      line.product.id != null)
+  ) {
+    return 1;
   }
   return 0;
 }
@@ -1588,7 +1599,7 @@ function lineMatchesProductIdFilter(line, productIdFilter) {
 }
 
 /**
- * إجمالي القطع = مجموع quantity لأسطر cart_items (من السطر أو product.quantity).
+ * إجمالي القطع = مجموع quantity لأسطر cart_items (من السطر أو variant، وليس مخزون product).
  * @param {{ productIdFilter?: string }} options — عند فلتر منتج UUID نجمع أسطر ذلك المنتج فقط.
  */
 function sumLineQuantitiesFromRaw(raw, options = {}) {
@@ -1842,40 +1853,48 @@ function finalizeTrendBucket(bucket) {
   };
 }
 
-/** مفتاح التجميع للرسم البياني: يوم / أسبوع (بداية الاثنين UTC) / شهر */
+/** YYYY-MM-DD بالتوقيت المحلي — يطابق getDefaultDateRange في الـ controller */
+function formatLocalCalendarDateKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** مفتاح التجميع للرسم البياني: يوم / أسبوع (بداية الاثنين محليًا) / شهر */
 function bucketKeyFromDate(date, granularity) {
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return null;
 
   if (granularity === "month") {
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
     return `${y}-${m}`;
   }
 
   if (granularity === "week") {
-    const day = d.getUTCDay();
+    const day = d.getDay();
     const diff = day === 0 ? -6 : 1 - day;
     const monday = new Date(d);
-    monday.setUTCDate(d.getUTCDate() + diff);
-    monday.setUTCHours(0, 0, 0, 0);
-    return monday.toISOString().slice(0, 10);
+    monday.setDate(d.getDate() + diff);
+    monday.setHours(0, 0, 0, 0);
+    return formatLocalCalendarDateKey(monday);
   }
 
-  return d.toISOString().slice(0, 10);
+  return formatLocalCalendarDateKey(d);
 }
 
 function listTrendBucketKeys(from, to, granularity) {
   const keys = [];
   const cur = new Date(from);
-  cur.setUTCHours(0, 0, 0, 0);
+  cur.setHours(0, 0, 0, 0);
   const end = new Date(to);
-  end.setUTCHours(23, 59, 59, 999);
+  end.setHours(23, 59, 59, 999);
 
   if (granularity === "day") {
     while (cur <= end) {
-      keys.push(cur.toISOString().slice(0, 10));
-      cur.setUTCDate(cur.getUTCDate() + 1);
+      keys.push(formatLocalCalendarDateKey(cur));
+      cur.setDate(cur.getDate() + 1);
     }
     return keys;
   }
@@ -1884,7 +1903,7 @@ function listTrendBucketKeys(from, to, granularity) {
     while (cur <= end) {
       const k = bucketKeyFromDate(cur, "week");
       if (k && !keys.includes(k)) keys.push(k);
-      cur.setUTCDate(cur.getUTCDate() + 7);
+      cur.setDate(cur.getDate() + 7);
     }
     return keys;
   }
@@ -1898,7 +1917,7 @@ function listTrendBucketKeys(from, to, granularity) {
         seen.add(k);
         keys.push(k);
       }
-      walk.setUTCMonth(walk.getUTCMonth() + 1);
+      walk.setMonth(walk.getMonth() + 1);
     }
     return keys;
   }
@@ -2152,16 +2171,13 @@ async function getOrdersStatsTimeSeries({
     return { date, ...finalizeTrendBucket(b) };
   });
 
-  const summary = finalizeTrendBucket(
-    points.reduce(
-      (acc, p) => ({
-        totalOrders: acc.totalOrders + p.totalOrders,
-        total: acc.total + p.total,
-        totalProductUnits: acc.totalProductUnits + p.totalProductUnits,
-      }),
-      { totalOrders: 0, total: 0, totalProductUnits: 0 },
-    ),
-  );
+  const summaryRaw = { totalOrders: 0, total: 0, totalProductUnits: 0 };
+  for (const b of bucketMap.values()) {
+    summaryRaw.totalOrders += b.totalOrders;
+    summaryRaw.total += b.total;
+    summaryRaw.totalProductUnits += b.totalProductUnits;
+  }
+  const summary = finalizeTrendBucket(summaryRaw);
 
   return {
     from: from.toISOString(),
