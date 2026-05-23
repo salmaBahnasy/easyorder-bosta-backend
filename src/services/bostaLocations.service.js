@@ -177,6 +177,22 @@ function mapCityRowToBostaShape(row) {
   };
 }
 
+function parseLocationSearch(search) {
+  if (search == null) return null;
+  const raw = Array.isArray(search) ? search[0] : search;
+  const s = String(raw).trim().slice(0, 120);
+  if (!s) return null;
+  return s.replace(/[%_\\,(){}]/g, "");
+}
+
+function applyLocationNameSearch(query, columns, term) {
+  const needle = parseLocationSearch(term);
+  if (!needle) return query;
+  const pattern = `%${needle}%`;
+  const orClause = columns.map((col) => `${col}.ilike.${pattern}`).join(",");
+  return query.or(orClause);
+}
+
 function mapDistrictRowToBostaShape(row) {
   if (!row) return null;
   const raw =
@@ -253,11 +269,17 @@ async function syncBostaLocationsFromApi() {
   };
 }
 
-async function getCitiesFromDb() {
-  const { data, error } = await supabase
+async function getCitiesFromDb({ search } = {}) {
+  const searchTerm = parseLocationSearch(search);
+
+  let query = supabase
     .from(BOSTA_CITIES_TABLE)
     .select("*")
     .order("name_ar", { ascending: true, nullsFirst: false });
+
+  query = applyLocationNameSearch(query, ["name", "name_ar", "alias", "code"], search);
+
+  const { data, error } = await query;
 
   if (error) {
     throw enrichBostaDbError(error);
@@ -268,10 +290,11 @@ async function getCitiesFromDb() {
     success: true,
     message: "Done successfully.",
     data: { list },
+    ...(searchTerm ? { search: { q: searchTerm, count: list.length } } : {}),
   };
 }
 
-async function getDistrictsFromDb(cityId) {
+async function getDistrictsFromDb(cityId, { search } = {}) {
   const id = String(cityId || "").trim();
   if (!id) {
     const err = new Error("cityId is required");
@@ -279,11 +302,26 @@ async function getDistrictsFromDb(cityId) {
     throw err;
   }
 
-  const { data, error } = await supabase
+  const searchTerm = parseLocationSearch(search);
+
+  let query = supabase
     .from(BOSTA_DISTRICTS_TABLE)
     .select("*")
     .eq("city_id", id)
     .order("district_other_name", { ascending: true, nullsFirst: false });
+
+  query = applyLocationNameSearch(
+    query,
+    [
+      "district_name",
+      "district_other_name",
+      "zone_name",
+      "zone_other_name",
+    ],
+    search,
+  );
+
+  const { data, error } = await query;
 
   if (error) {
     throw enrichBostaDbError(error);
@@ -294,6 +332,7 @@ async function getDistrictsFromDb(cityId) {
     success: true,
     message: "Done successfully.",
     data: districts,
+    ...(searchTerm ? { search: { q: searchTerm, count: districts.length } } : {}),
   };
 }
 

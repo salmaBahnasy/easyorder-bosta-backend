@@ -4,6 +4,14 @@ const {
   getDistrictsFromDb,
 } = require("../services/bostaLocations.service");
 
+function pickLocationSearchQuery(req) {
+  const raw =
+    req.query.q ?? req.query.search ?? req.query.name ?? req.query.query;
+  if (raw == null) return undefined;
+  const s = String(Array.isArray(raw) ? raw[0] : raw).trim();
+  return s === "" ? undefined : s;
+}
+
 async function syncLocations(req, res) {
   try {
     const result = await syncBostaLocationsFromApi();
@@ -42,7 +50,8 @@ async function syncLocations(req, res) {
 
 async function listCities(req, res) {
   try {
-    const payload = await getCitiesFromDb();
+    const search = pickLocationSearchQuery(req);
+    const payload = await getCitiesFromDb({ search });
     res.json(payload);
   } catch (error) {
     if (error.code === "BOSTA_LOCATIONS_NOT_CONFIGURED") {
@@ -66,7 +75,8 @@ async function listCities(req, res) {
 async function listDistricts(req, res) {
   try {
     const { cityId } = req.params;
-    const payload = await getDistrictsFromDb(cityId);
+    const search = pickLocationSearchQuery(req);
+    const payload = await getDistrictsFromDb(cityId, { search });
     res.json(payload);
   } catch (error) {
     if (error.code === "INVALID_CITY_ID") {

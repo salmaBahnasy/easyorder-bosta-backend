@@ -212,6 +212,13 @@ async function getOrders(req, res) {
         req.query.customerPhone ||
         req.query.customer_phone,
     );
+    const customer_name = optionalQueryParam(
+      req.query.customer_name ||
+        req.query.customerName ||
+        req.query.full_name ||
+        req.query.fullName ||
+        req.query.name,
+    );
     const employee_scope = optionalQueryParam(
       req.query.employee_scope || req.query.employeeScope,
     );
@@ -272,6 +279,7 @@ async function getOrders(req, res) {
       product_id,
       product_sku,
       phone,
+      customer_name,
       ignoreEmployeeLogDateRange,
     });
 
@@ -290,6 +298,7 @@ async function getOrders(req, res) {
       easyorder_id: easyorder_id || undefined,
       product_sku,
       phone,
+      customer_name,
       page,
       limit,
     };
@@ -305,7 +314,7 @@ async function getOrders(req, res) {
       appliedFilters,
       filterLists: getOrdersFilterLists(),
       listOrdersQueryReference:
-        "GET /api/orders?... phone|mobile|customer_phone filters raw_data. employeeId|employee_id (UUID or email). employee_scope=all|any|all_time: with employee, from/to apply to activity logs only. Without employee_scope: from/to on order_status_logs.changed_at. Without employee: from/to on orders.created_at. product_id or easyorder_id (UUID): cart match via @> (no SKU required).",
+        "GET /api/orders?... phone|mobile|customer_phone and customer_name|customerName|full_name|fullName|name (partial match on customer name in raw_data). employeeId|employee_id (UUID or email). employee_scope=all|any|all_time: with employee, from/to apply to activity logs only. Without employee_scope: from/to on order_status_logs.changed_at. Without employee: from/to on orders.created_at. product_id or easyorder_id (UUID): cart match via @> (no SKU required).",
       ...result,
     });
   } catch (error) {

@@ -23,10 +23,10 @@ router.get("/locations/sync", (req, res) => {
   });
 });
 
-/** Governorates (cities) — same shape as Bosta GET /v2/cities, from our DB. */
+/** Governorates (cities) — optional ?q= or ?search= (Arabic/English name, alias, code). */
 router.get("/cities", listCities);
 
-/** Districts for a city — same shape as Bosta GET /v2/cities/:cityId/districts, from our DB. */
+/** Districts for a city — optional ?q= or ?search= (district/zone names AR/EN). */
 router.get("/cities/:cityId/districts", listDistricts);
 
 module.exports = router;

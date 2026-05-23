@@ -155,6 +155,30 @@ async function collectOrderIdsUnionIlikePaths({
   return [...ids];
 }
 
+const CUSTOMER_NAME_ILIKE_PATHS = [
+  "raw_data->>full_name",
+  "raw_data->>fullName",
+  "raw_data->>customer_name",
+  "raw_data->>customerName",
+  "raw_data->>first_name",
+  "raw_data->>firstName",
+];
+
+/** تقاطع قوائم order_id (AND) — null/undefined = لا فلتر. */
+function intersectOrderIdLists(...lists) {
+  let result = null;
+  for (const list of lists) {
+    if (!list) continue;
+    if (!result) {
+      result = list.map(String);
+      continue;
+    }
+    const set = new Set(list.map(String));
+    result = result.filter((id) => set.has(String(id)));
+  }
+  return result;
+}
+
 /** قيمة آمنة للبحث؛ إن أصبحت فارغة بعد التنقية يُهمَل الفلتر (لا 400). */
 function parseProductFilterInput(raw) {
   if (raw == null || String(raw).trim() === "") return "";
@@ -660,6 +684,7 @@ async function getWebhookOrders({
   product_id,
   product_sku,
   phone,
+  customer_name,
   ignoreEmployeeLogDateRange = false,
 }) {
   const fromIndex = (page - 1) * limit;
@@ -748,10 +773,36 @@ async function getWebhookOrders({
     }
   }
 
-  function applyBaseListFiltersAndPhone(q) {
+  const customerNameNeedle = parseProductFilterInput(customer_name);
+  const pCustomerName = postgrestIlikeStarWrap(customerNameNeedle);
+
+  let customerNameOrderIds = null;
+  if (pCustomerName) {
+    customerNameOrderIds = await collectOrderIdsUnionIlikePaths({
+      paths: CUSTOMER_NAME_ILIKE_PATHS,
+      ilikePattern: pCustomerName,
+      applyBaseFilters: applyBaseListFilters,
+    });
+    if (!customerNameOrderIds.length) {
+      return {
+        page,
+        limit,
+        total: 0,
+        totalPages: 1,
+        data: [],
+      };
+    }
+  }
+
+  const scopedOrderIds = intersectOrderIdLists(
+    phoneOrderIds,
+    customerNameOrderIds,
+  );
+
+  function applyBaseListFiltersAndScopedIds(q) {
     let x = applyBaseListFilters(q);
-    if (phoneOrderIds) {
-      x = applyOrderIdMembershipFilter(x, phoneOrderIds);
+    if (scopedOrderIds) {
+      x = applyOrderIdMembershipFilter(x, scopedOrderIds);
     }
     return x;
   }
@@ -764,7 +815,7 @@ async function getWebhookOrders({
     productCartByUuidOrderIds =
       await collectOrderIdsUnionContainsCartProductUuid(
         pidForProduct,
-        applyBaseListFiltersAndPhone,
+        applyBaseListFiltersAndScopedIds,
       );
     if (!productCartByUuidOrderIds.length) {
       return {
@@ -779,8 +830,8 @@ async function getWebhookOrders({
 
   let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
   query = applyBaseListFilters(query);
-  if (phoneOrderIds) {
-    query = applyOrderIdMembershipFilter(query, phoneOrderIds);
+  if (scopedOrderIds) {
+    query = applyOrderIdMembershipFilter(query, scopedOrderIds);
   }
 
   if (productCartByUuidOrderIds) {
