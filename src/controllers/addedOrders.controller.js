@@ -79,6 +79,13 @@ async function postAddedOrder(req, res) {
   }
 }
 
+function pickQueryParam(raw) {
+  if (raw == null) return undefined;
+  const value = Array.isArray(raw) ? raw[0] : raw;
+  const trimmed = String(value).trim();
+  return trimmed || undefined;
+}
+
 async function getAddedOrders(req, res) {
   try {
     const fromRaw = req.query?.from;
@@ -90,11 +97,26 @@ async function getAddedOrders(req, res) {
       toRaw != null &&
       String(Array.isArray(toRaw) ? toRaw[0] : toRaw).trim() !== "";
 
+    const employeeId = pickQueryParam(
+      req.query.employee_id ||
+        req.query.employeeId ||
+        req.query.added_by_employee_id ||
+        req.query.employee,
+    );
+    const productName = pickQueryParam(
+      req.query.product ||
+        req.query.product_name ||
+        req.query.productName ||
+        req.query.q,
+    );
+
     const result = await listAddedOrders({
       page: req.query.page,
       limit: req.query.limit,
       from: hasFrom ? new Date(Array.isArray(fromRaw) ? fromRaw[0] : fromRaw) : undefined,
       to: hasTo ? new Date(Array.isArray(toRaw) ? toRaw[0] : toRaw) : undefined,
+      employeeId,
+      productName,
     });
 
     res.json({

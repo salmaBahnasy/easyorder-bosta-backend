@@ -19,6 +19,68 @@ function pickString(...values) {
   return "";
 }
 
+function sanitizeIlikeNeedle(value) {
+  const s = String(value).trim().slice(0, 200);
+  if (!s) return "";
+  return s.replace(/[%_\\,(){}]/g, "");
+}
+
+function postgrestIlikeStarWrap(needle) {
+  const n = sanitizeIlikeNeedle(needle);
+  if (!n) return null;
+  return `*${n.replace(/\*/g, "\\*")}*`;
+}
+
+function escapeIlikeLiteral(value) {
+  return String(value)
+    .trim()
+    .replace(/\\/g, "\\\\")
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+}
+
+async function resolveEmployeeFilter(employeeFilter) {
+  const raw = pickString(employeeFilter);
+  if (!raw) return null;
+  if (!raw.includes("@")) return raw;
+
+  const literal = escapeIlikeLiteral(raw);
+  let { data, error } = await supabase
+    .from(EMPLOYEES_TABLE)
+    .select("id")
+    .ilike("email", literal)
+    .limit(1);
+
+  if (error) {
+    throw enrichAddedOrdersDbError(error);
+  }
+
+  let row = Array.isArray(data) && data.length ? data[0] : null;
+  if (!row) {
+    ({ data, error } = await supabase
+      .from(EMPLOYEES_TABLE)
+      .select("id")
+      .eq("email", raw.toLowerCase())
+      .limit(1));
+    if (error) {
+      throw enrichAddedOrdersDbError(error);
+    }
+    row = Array.isArray(data) && data.length ? data[0] : null;
+  }
+
+  return row?.id != null ? String(row.id) : null;
+}
+
+function emptyListResult(page, limit) {
+  return {
+    page,
+    limit,
+    total: 0,
+    totalPages: 1,
+    data: [],
+  };
+}
+
 function isMissingAddedOrdersTableError(message) {
   const m = String(message || "");
   return m.includes("added_orders") || m.includes("schema cache");
@@ -208,7 +270,14 @@ async function createAddedOrder({ customerName, phone, products, totalCost, acto
   return formatAddedOrderView(data, employeeById);
 }
 
-async function listAddedOrders({ page = 1, limit = DEFAULT_LIST_LIMIT, from, to } = {}) {
+async function listAddedOrders({
+  page = 1,
+  limit = DEFAULT_LIST_LIMIT,
+  from,
+  to,
+  employeeId,
+  productName,
+} = {}) {
   const safeLimit = Math.min(
     Math.max(Number(limit) || DEFAULT_LIST_LIMIT, 1),
     MAX_LIST_LIMIT,
@@ -217,9 +286,27 @@ async function listAddedOrders({ page = 1, limit = DEFAULT_LIST_LIMIT, from, to 
   const fromIndex = (safePage - 1) * safeLimit;
   const toIndex = fromIndex + safeLimit - 1;
 
+  const employeeFilterRaw = pickString(employeeId);
+  const resolvedEmployeeId = employeeFilterRaw
+    ? await resolveEmployeeFilter(employeeFilterRaw)
+    : null;
+  if (employeeFilterRaw && !resolvedEmployeeId) {
+    return emptyListResult(safePage, safeLimit);
+  }
+
+  const productPattern = postgrestIlikeStarWrap(productName);
+
   let query = supabase
     .from(ADDED_ORDERS_TABLE)
     .select("*", { count: "exact" });
+
+  if (resolvedEmployeeId) {
+    query = query.eq("added_by_employee_id", resolvedEmployeeId);
+  }
+
+  if (productPattern) {
+    query = query.ilike("products", productPattern);
+  }
 
   if (from) {
     query = query.gte("created_at", new Date(from).toISOString());
@@ -244,6 +331,10 @@ async function listAddedOrders({ page = 1, limit = DEFAULT_LIST_LIMIT, from, to 
     limit: safeLimit,
     total: count || 0,
     totalPages: Math.ceil((count || 0) / safeLimit) || 1,
+    filters: {
+      employeeId: resolvedEmployeeId || null,
+      productName: sanitizeIlikeNeedle(productName) || null,
+    },
     data: rows.map((row) => formatAddedOrderView(row, employeeById)),
   };
 }
