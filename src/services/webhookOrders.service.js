@@ -645,7 +645,7 @@ function applyProductCartIlikeFilters(query, { product_id, product_sku }) {
 
 async function getWebhookOrders({
   page = 1,
-  limit = 20,
+  limit = 50,
   from,
   to,
   status,

@@ -34,12 +34,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/orders?page=1&limit=20",
+              "raw": "{{baseUrl}}/api/orders?page=1&limit=50",
               "host": ["{{baseUrl}}"],
               "path": ["api", "orders"],
               "query": [
                 { "key": "page", "value": "1" },
-                { "key": "limit", "value": "20" },
+                { "key": "limit", "value": "50" },
                 { "key": "from", "value": "", "disabled": true },
                 { "key": "to", "value": "", "disabled": true },
                 { "key": "status", "value": "", "disabled": true },
@@ -182,12 +182,12 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/api/easyorder/orders?page=1&limit=20",
+              "raw": "{{baseUrl}}/api/easyorder/orders?page=1&limit=50",
               "host": ["{{baseUrl}}"],
               "path": ["api", "easyorder", "orders"],
               "query": [
                 { "key": "page", "value": "1" },
-                { "key": "limit", "value": "20" }
+                { "key": "limit", "value": "50" }
               ]
             }
           }
