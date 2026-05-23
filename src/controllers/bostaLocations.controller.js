@@ -2,6 +2,7 @@ const {
   syncBostaLocationsFromApi,
   getCitiesFromDb,
   getDistrictsFromDb,
+  getZonesFromDb,
 } = require("../services/bostaLocations.service");
 
 function pickLocationSearchQuery(req) {
@@ -86,6 +87,13 @@ async function listDistricts(req, res) {
       });
       return;
     }
+    if (error.code === "CITY_NOT_FOUND") {
+      res.status(404).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
     if (error.code === "BOSTA_LOCATIONS_NOT_CONFIGURED") {
       res.status(503).json({
         success: false,
@@ -104,8 +112,42 @@ async function listDistricts(req, res) {
   }
 }
 
+async function listZones(req, res) {
+  try {
+    const { cityId } = req.params;
+    const search = pickLocationSearchQuery(req);
+    const payload = await getZonesFromDb(cityId, { search });
+    res.json(payload);
+  } catch (error) {
+    if (error.code === "INVALID_CITY_ID") {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error.code === "CITY_NOT_FOUND") {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    if (error.code === "BOSTA_LOCATIONS_NOT_CONFIGURED") {
+      res.status(503).json({
+        success: false,
+        message: "Bosta locations tables are not set up in Supabase",
+        code: error.code,
+        error: error.message,
+        setupHint: error.setupHint,
+      });
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch zones",
+      error: error.message,
+    });
+  }
+}
+
 module.exports = {
   syncLocations,
   listCities,
   listDistricts,
+  listZones,
 };

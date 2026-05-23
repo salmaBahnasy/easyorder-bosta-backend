@@ -4,6 +4,7 @@ const {
   syncLocations,
   listCities,
   listDistricts,
+  listZones,
 } = require("../controllers/bostaLocations.controller");
 
 const router = express.Router();
@@ -28,5 +29,8 @@ router.get("/cities", listCities);
 
 /** Districts for a city — optional ?q= or ?search= (district/zone names AR/EN). */
 router.get("/cities/:cityId/districts", listDistricts);
+
+/** Zones grouped with districts (districtId on each item) — optional ?q= */
+router.get("/cities/:cityId/zones", listZones);
 
 module.exports = router;

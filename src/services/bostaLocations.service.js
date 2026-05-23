@@ -197,18 +197,57 @@ function mapDistrictRowToBostaShape(row) {
   if (!row) return null;
   const raw =
     row.raw_data && typeof row.raw_data === "object" ? row.raw_data : {};
+  const zoneName = row.zone_name ?? raw.zoneName ?? null;
+  const zoneOtherName = row.zone_other_name ?? raw.zoneOtherName ?? null;
+  const districtName = row.district_name ?? raw.districtName ?? null;
+  const districtOtherName =
+    row.district_other_name ?? raw.districtOtherName ?? null;
+  const labelAr =
+    [zoneOtherName, districtOtherName].filter(Boolean).join(" - ") ||
+    districtOtherName ||
+    districtName ||
+    zoneOtherName ||
+    zoneName;
   return {
+    cityId: row.city_id ?? null,
     zoneId: row.zone_id ?? raw.zoneId,
-    zoneName: row.zone_name ?? raw.zoneName,
-    zoneOtherName: row.zone_other_name ?? raw.zoneOtherName,
+    zoneName,
+    zoneOtherName,
     districtId: row.id ?? raw.districtId,
-    districtName: row.district_name ?? raw.districtName,
-    districtOtherName: row.district_other_name ?? raw.districtOtherName,
+    districtName,
+    districtOtherName,
+    /** للعرض في القائمة: المنطقة (zone) + الحي (district) */
+    labelAr,
     pickupAvailability:
       row.pickup_availability ?? raw.pickupAvailability ?? true,
     dropOffAvailability:
       row.drop_off_availability ?? raw.dropOffAvailability ?? true,
   };
+}
+
+async function fetchCityRowById(cityId) {
+  const id = String(cityId || "").trim();
+  if (!id) {
+    const err = new Error("cityId is required");
+    err.code = "INVALID_CITY_ID";
+    throw err;
+  }
+
+  const { data, error } = await supabase
+    .from(BOSTA_CITIES_TABLE)
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) {
+    throw enrichBostaDbError(error);
+  }
+  if (!data) {
+    const err = new Error("City not found");
+    err.code = "CITY_NOT_FOUND";
+    throw err;
+  }
+  return data;
 }
 
 async function syncBostaLocationsFromApi() {
@@ -295,12 +334,9 @@ async function getCitiesFromDb({ search } = {}) {
 }
 
 async function getDistrictsFromDb(cityId, { search } = {}) {
-  const id = String(cityId || "").trim();
-  if (!id) {
-    const err = new Error("cityId is required");
-    err.code = "INVALID_CITY_ID";
-    throw err;
-  }
+  const cityRow = await fetchCityRowById(cityId);
+  const id = cityRow.id;
+  const city = mapCityRowToBostaShape(cityRow);
 
   const searchTerm = parseLocationSearch(search);
 
@@ -308,6 +344,7 @@ async function getDistrictsFromDb(cityId, { search } = {}) {
     .from(BOSTA_DISTRICTS_TABLE)
     .select("*")
     .eq("city_id", id)
+    .order("zone_other_name", { ascending: true, nullsFirst: false })
     .order("district_other_name", { ascending: true, nullsFirst: false });
 
   query = applyLocationNameSearch(
@@ -331,8 +368,53 @@ async function getDistrictsFromDb(cityId, { search } = {}) {
   return {
     success: true,
     message: "Done successfully.",
+    city,
     data: districts,
     ...(searchTerm ? { search: { q: searchTerm, count: districts.length } } : {}),
+  };
+}
+
+/**
+ * مناطق (zones) مجمّعة من صفوف districts — نفس فكرة Bosta /zones لكن مع districtId لكل حي.
+ */
+async function getZonesFromDb(cityId, { search } = {}) {
+  const { city, data: districts } = await getDistrictsFromDb(cityId, { search });
+  const zoneMap = new Map();
+
+  for (const d of districts) {
+    const zoneKey = d.zoneId || d.zoneName || "__unset";
+    if (!zoneMap.has(zoneKey)) {
+      zoneMap.set(zoneKey, {
+        _id: d.zoneId || zoneKey,
+        name: d.zoneName || null,
+        nameAr: d.zoneOtherName || null,
+        districts: [],
+      });
+    }
+    zoneMap.get(zoneKey).districts.push({
+      districtId: d.districtId,
+      districtName: d.districtName,
+      districtOtherName: d.districtOtherName,
+      labelAr: d.labelAr,
+      pickupAvailability: d.pickupAvailability,
+      dropOffAvailability: d.dropOffAvailability,
+    });
+  }
+
+  return {
+    success: true,
+    message: "Done successfully.",
+    city,
+    data: [...zoneMap.values()],
+    ...(search
+      ? {
+          search: {
+            q: parseLocationSearch(search),
+            zoneCount: zoneMap.size,
+            districtCount: districts.length,
+          },
+        }
+      : {}),
   };
 }
 
@@ -342,4 +424,5 @@ module.exports = {
   syncBostaLocationsFromApi,
   getCitiesFromDb,
   getDistrictsFromDb,
+  getZonesFromDb,
 };
