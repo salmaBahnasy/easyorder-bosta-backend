@@ -825,6 +825,7 @@ async function getOrdersStatsTrend(req, res) {
       status,
       product_id,
       product_sku,
+      useEgyptBuckets: isEasyOrderApiRequest(req),
     });
 
     res.json({

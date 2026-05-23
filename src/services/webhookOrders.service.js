@@ -1,6 +1,10 @@
 const crypto = require("crypto");
 
 const supabase = require("../config/supabase");
+const {
+  getEgyptTrendBucketKey,
+  listEgyptTrendBucketKeys,
+} = require("../utils/dateRange");
 
 const ALLOWED_ORDER_STATUSES = [
   "canceled",
@@ -1952,9 +1956,17 @@ async function getOrdersStatsTimeSeries({
   status: listStatusFilter,
   product_id,
   product_sku,
+  useEgyptBuckets = false,
 }) {
   const gran =
     granularity === "week" || granularity === "month" ? granularity : "day";
+
+  const bucketKeyForDate = useEgyptBuckets
+    ? (date, g) => getEgyptTrendBucketKey(date, g)
+    : (date, g) => bucketKeyFromDate(date, g);
+  const listBucketKeys = useEgyptBuckets
+    ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
+    : (f, t, g) => listTrendBucketKeys(f, t, g);
 
   let orderIds = null;
   let filterOrdersByCreatedAtInRange = true;
@@ -1969,7 +1981,7 @@ async function getOrdersStatsTimeSeries({
         from: from.toISOString(),
         to: to.toISOString(),
         granularity: gran,
-        points: listTrendBucketKeys(from, to, gran).map((date) => ({
+        points: listBucketKeys(from, to, gran).map((date) => ({
           date,
           ...emptyTrendBucket(),
         })),
@@ -1997,7 +2009,7 @@ async function getOrdersStatsTimeSeries({
         from: from.toISOString(),
         to: to.toISOString(),
         granularity: gran,
-        points: listTrendBucketKeys(from, to, gran).map((date) => ({
+        points: listBucketKeys(from, to, gran).map((date) => ({
           date,
           ...emptyTrendBucket(),
         })),
@@ -2066,7 +2078,7 @@ async function getOrdersStatsTimeSeries({
         from: from.toISOString(),
         to: to.toISOString(),
         granularity: gran,
-        points: listTrendBucketKeys(from, to, gran).map((date) => ({
+        points: listBucketKeys(from, to, gran).map((date) => ({
           date,
           ...emptyTrendBucket(),
         })),
@@ -2142,7 +2154,7 @@ async function getOrdersStatsTimeSeries({
 
       for (const row of data) {
         rowCount += 1;
-        const key = bucketKeyFromDate(row.created_at, gran);
+        const key = bucketKeyForDate(row.created_at, gran);
         if (!key) continue;
 
         if (!bucketMap.has(key)) {
@@ -2173,7 +2185,7 @@ async function getOrdersStatsTimeSeries({
     if (truncated) break;
   }
 
-  const points = listTrendBucketKeys(from, to, gran).map((date) => {
+  const points = listBucketKeys(from, to, gran).map((date) => {
     const b = bucketMap.get(date) || {
       totalOrders: 0,
       total: 0,
