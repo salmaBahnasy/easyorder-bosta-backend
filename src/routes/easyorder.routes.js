@@ -7,6 +7,7 @@ const employeesRoutes = require("./employees.routes");
 const productsRoutes = require("./products.routes");
 const sallaRoutes = require("./salla.routes");
 const bostaRoutes = require("./bosta.routes");
+const addedOrdersRoutes = require("./addedOrders.routes");
 
 const router = express.Router();
 
@@ -25,5 +26,6 @@ router.use("/employees", employeesRoutes);
 router.use("/products", productsRoutes);
 router.use("/salla", sallaRoutes);
 router.use("/bosta", bostaRoutes);
+router.use("/added-orders", addedOrdersRoutes);
 
 module.exports = router;
