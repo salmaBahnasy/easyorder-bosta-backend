@@ -15,6 +15,10 @@ const {
   getOrdersFilterLists,
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
+const {
+  resolveEasyOrderDateRange,
+  isEasyOrderApiRequest,
+} = require("../utils/dateRange");
 
 /** مثال لجسم POST /api/orders — الحقول الاختيارية: order_source (افتراضي store)، order_type (افتراضي new)، shipping_status (افتراضي in_progress). حالة الصف orders.status = new. */
 const POST_ORDER_MANUAL_EXAMPLE = {
@@ -95,15 +99,90 @@ function getDefaultDateRange() {
   return { from, to };
 }
 
+function resolveOrdersListDateRange(req) {
+  if (isEasyOrderApiRequest(req)) {
+    return resolveEasyOrderDateRange(req);
+  }
+  const defaultRange = getDefaultDateRange();
+  return {
+    from: req.query.from ? new Date(req.query.from) : defaultRange.from,
+    to: req.query.to ? new Date(req.query.to) : defaultRange.to,
+  };
+}
+
+function resolveOrdersStatsDateRange(req) {
+  if (isEasyOrderApiRequest(req)) {
+    return resolveEasyOrderDateRange(req);
+  }
+
+  let from = null;
+  let to = null;
+
+  if (req.query.from) {
+    from = new Date(req.query.from);
+    if (Number.isNaN(from.getTime())) {
+      const err = new Error("Invalid from date");
+      err.code = "INVALID_FROM";
+      throw err;
+    }
+  }
+
+  if (req.query.to) {
+    to = new Date(req.query.to);
+    if (Number.isNaN(to.getTime())) {
+      const err = new Error("Invalid to date");
+      err.code = "INVALID_TO";
+      throw err;
+    }
+  }
+
+  return { from, to };
+}
+
+function resolveOrdersTrendDateRange(req) {
+  if (isEasyOrderApiRequest(req)) {
+    return resolveEasyOrderDateRange(req);
+  }
+
+  const defaultRange = getDefaultDateRange();
+  const from = req.query.from ? new Date(req.query.from) : defaultRange.from;
+  const to = req.query.to ? new Date(req.query.to) : defaultRange.to;
+
+  if (Number.isNaN(from.getTime())) {
+    const err = new Error("Invalid from date");
+    err.code = "INVALID_FROM";
+    throw err;
+  }
+  if (Number.isNaN(to.getTime())) {
+    const err = new Error("Invalid to date");
+    err.code = "INVALID_TO";
+    throw err;
+  }
+
+  return { from, to };
+}
+
 async function getOrders(req, res) {
   try {
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 50;
 
-    const defaultRange = getDefaultDateRange();
+    let from;
+    let to;
+    try {
+      ({ from, to } = resolveOrdersListDateRange(req));
+    } catch (error) {
+      if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      throw error;
+    }
 
-    const from = req.query.from ? new Date(req.query.from) : defaultRange.from;
-    const to = req.query.to ? new Date(req.query.to) : defaultRange.to;
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      res.status(400).json({ success: false, message: "Invalid from or to date" });
+      return;
+    }
 
     const status = optionalQueryParam(req.query.status);
     const employeeId = optionalQueryParam(
@@ -574,29 +653,16 @@ async function getOrdersStats(req, res) {
       return;
     }
 
-    let from = null;
-    let to = null;
-
-    if (req.query.from) {
-      from = new Date(req.query.from);
-      if (Number.isNaN(from.getTime())) {
-        res.status(400).json({
-          success: false,
-          message: "Invalid from date",
-        });
+    let from;
+    let to;
+    try {
+      ({ from, to } = resolveOrdersStatsDateRange(req));
+    } catch (error) {
+      if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+        res.status(400).json({ success: false, message: error.message });
         return;
       }
-    }
-
-    if (req.query.to) {
-      to = new Date(req.query.to);
-      if (Number.isNaN(to.getTime())) {
-        res.status(400).json({
-          success: false,
-          message: "Invalid to date",
-        });
-        return;
-      }
+      throw error;
     }
 
     const stats = await getOrdersStatistics({
@@ -661,8 +727,6 @@ async function getOrdersStats(req, res) {
  */
 async function getOrdersStatsTrend(req, res) {
   try {
-    const defaultRange = getDefaultDateRange();
-
     const employeeId = normalizeQueryId(
       req.query.employeeId || req.query.userId || req.query.employee_id,
     );
@@ -737,16 +801,16 @@ async function getOrdersStatsTrend(req, res) {
       return;
     }
 
-    let from = req.query.from ? new Date(req.query.from) : defaultRange.from;
-    let to = req.query.to ? new Date(req.query.to) : defaultRange.to;
-
-    if (Number.isNaN(from.getTime())) {
-      res.status(400).json({ success: false, message: "Invalid from date" });
-      return;
-    }
-    if (Number.isNaN(to.getTime())) {
-      res.status(400).json({ success: false, message: "Invalid to date" });
-      return;
+    let from;
+    let to;
+    try {
+      ({ from, to } = resolveOrdersTrendDateRange(req));
+    } catch (error) {
+      if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      throw error;
     }
 
     const chart = await getOrdersStatsTimeSeries({
