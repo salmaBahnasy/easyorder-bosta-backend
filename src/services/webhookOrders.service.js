@@ -640,6 +640,27 @@ function applyRawDataMetaContains(query, { order_source, order_type, shipping_st
   return q;
 }
 
+/**
+ * فلتر منتج UUID في cart_items / cartItems — استعلام واحد بدل جمع آلاف order_id في URL.
+ */
+function applyProductUuidCartContainsOr(query, productUuid) {
+  const id = normalizeProductIdForCartFilter(productUuid);
+  if (!id || !UUID_LIKE.test(id)) return query;
+  const e = escapePostgrestJsonStringForCsFragment(id);
+  return query.or(
+    [
+      `raw_data.cs.{"cart_items":[{"product_id":"${e}"}]}`,
+      `raw_data.cs.{"cart_items":[{"productId":"${e}"}]}`,
+      `raw_data.cs.{"cart_items":[{"id":"${e}"}]}`,
+      `raw_data.cs.{"cart_items":[{"product":{"id":"${e}"}}]}`,
+      `raw_data.cs.{"cart_items":[{"product":{"product_id":"${e}"}}]}`,
+      `raw_data.cs.{"cartItems":[{"product_id":"${e}"}]}`,
+      `raw_data.cs.{"cartItems":[{"productId":"${e}"}]}`,
+      `raw_data.cs.{"cartItems":[{"product":{"id":"${e}"}}]}`,
+    ].join(","),
+  );
+}
+
 function applyProductCartIlikeFilters(query, { product_id, product_sku }) {
   const pidNeedle = normalizeProductIdForCartFilter(product_id);
   const skuNeedle = parseProductFilterInput(product_sku);
@@ -809,24 +830,8 @@ async function getWebhookOrders({
 
   const pidForProduct = normalizeProductIdForCartFilter(product_id);
   const skuForProduct = parseProductFilterInput(product_sku);
-
-  let productCartByUuidOrderIds = null;
-  if (pidForProduct && UUID_LIKE.test(pidForProduct) && !skuForProduct) {
-    productCartByUuidOrderIds =
-      await collectOrderIdsUnionContainsCartProductUuid(
-        pidForProduct,
-        applyBaseListFiltersAndScopedIds,
-      );
-    if (!productCartByUuidOrderIds.length) {
-      return {
-        page,
-        limit,
-        total: 0,
-        totalPages: 1,
-        data: [],
-      };
-    }
-  }
+  const useProductUuidContains =
+    pidForProduct && UUID_LIKE.test(pidForProduct) && !skuForProduct;
 
   let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
   query = applyBaseListFilters(query);
@@ -834,8 +839,8 @@ async function getWebhookOrders({
     query = applyOrderIdMembershipFilter(query, scopedOrderIds);
   }
 
-  if (productCartByUuidOrderIds) {
-    query = applyOrderIdMembershipFilter(query, productCartByUuidOrderIds);
+  if (useProductUuidContains) {
+    query = applyProductUuidCartContainsOr(query, pidForProduct);
   } else {
     query = applyProductCartIlikeFilters(query, { product_id, product_sku });
   }
@@ -1299,53 +1304,20 @@ async function getOrdersStatistics({
     return q;
   }
 
-  let statsProductOrderIds = null;
   const pidForStats = normalizeProductIdForCartFilter(product_id);
   const skuForStats = parseProductFilterInput(product_sku);
-  if (pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats) {
-    async function applyStatsBaseForProductUuidCollect(q) {
-      let x = q;
-      if (from && filterOrdersByCreatedAtInRange) {
-        x = x.gte("created_at", from.toISOString());
-      }
-      if (to && filterOrdersByCreatedAtInRange) {
-        x = x.lte("created_at", to.toISOString());
-      }
-      x = applyStatsRawContains(x, null, null);
-      if (orderIds != null && orderIds.length) {
-        x = applyOrderIdMembershipFilter(x, orderIds);
-      }
-      return x;
-    }
-    statsProductOrderIds = await collectOrderIdsUnionContainsCartProductUuid(
-      pidForStats,
-      applyStatsBaseForProductUuidCollect,
-    );
-    if (!statsProductOrderIds.length) {
-      return buildEmptyStatsBreakdownResponse();
-    }
-  }
+  const useProductUuidContains =
+    pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats;
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
-    if (statsProductOrderIds != null && statsProductOrderIds.length) {
-      const pset = new Set(statsProductOrderIds.map(String));
-      if (chunk && chunk.length) {
-        const merged = chunk.filter((id) => pset.has(String(id)));
-        if (!merged.length) return { nextQ: q, skip: true };
-        return {
-          nextQ: applyOrderIdMembershipFilter(q, merged),
-          skip: false,
-        };
-      }
-      return {
-        nextQ: applyOrderIdMembershipFilter(q, statsProductOrderIds),
-        skip: false,
-      };
-    }
+    let nextQ = q;
     if (chunk && chunk.length) {
-      return { nextQ: q.in("order_id", chunk), skip: false };
+      nextQ = nextQ.in("order_id", chunk);
     }
-    return { nextQ: q, skip: false };
+    if (useProductUuidContains) {
+      nextQ = applyProductUuidCartContainsOr(nextQ, pidForStats);
+    }
+    return { nextQ, skip: false };
   }
 
   async function countAggregatedOrders(
@@ -1371,7 +1343,7 @@ async function getOrdersStatistics({
         q = q.lte("created_at", to.toISOString());
       }
       q = applyStatsRawContains(q, breakdownDim, breakdownValue);
-      if (statsProductOrderIds == null) {
+      if (!useProductUuidContains) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
       if (onlyOrderStatus) {
@@ -1412,7 +1384,7 @@ async function getOrdersStatistics({
         q = q.lte("created_at", to.toISOString());
       }
       q = applyStatsRawContains(q, null, null);
-      if (statsProductOrderIds == null) {
+      if (!useProductUuidContains) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
       q = q.eq("status", dbStatusForKey);
@@ -1446,7 +1418,7 @@ async function getOrdersStatistics({
       q = q.lte("created_at", to.toISOString());
     }
     q = applyStatsRawContains(q, null, null);
-    if (statsProductOrderIds == null) {
+    if (!useProductUuidContains) {
       q = applyProductCartIlikeFilters(q, { product_id, product_sku });
     }
     if (listStatusFilterNorm != null) {
@@ -1521,7 +1493,7 @@ async function getOrdersStatistics({
         q = q.lte("created_at", to.toISOString());
       }
       q = applyStatsRawContains(q, null, null);
-      if (statsProductOrderIds == null) {
+      if (!useProductUuidContains) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
       if (listStatusFilterNorm != null) {
@@ -1803,17 +1775,8 @@ async function fetchAnalyticsOrderRows({
 
   const pidNeedle = normalizeProductIdForCartFilter(product_id);
   const skuNeedle = parseProductFilterInput(product_sku);
-
-  let orderIdsByProductUuid = null;
-  if (pidNeedle && UUID_LIKE.test(pidNeedle) && !skuNeedle) {
-    orderIdsByProductUuid = await collectOrderIdsUnionContainsCartProductUuid(
-      pidNeedle,
-      applyNonProductFilters,
-    );
-    if (!orderIdsByProductUuid.length) {
-      return { rows: [], truncated: false };
-    }
-  }
+  const useProductUuidContains =
+    pidNeedle && UUID_LIKE.test(pidNeedle) && !skuNeedle;
 
   const rows = [];
   let truncated = false;
@@ -1834,8 +1797,8 @@ async function fetchAnalyticsOrderRows({
       .order("created_at", { ascending: false });
 
     q = applyNonProductFilters(q);
-    if (orderIdsByProductUuid) {
-      q = applyOrderIdMembershipFilter(q, orderIdsByProductUuid);
+    if (useProductUuidContains) {
+      q = applyProductUuidCartContainsOr(q, pidNeedle);
     } else {
       q = applyProductCartIlikeFilters(q, { product_id, product_sku });
     }
@@ -2102,63 +2065,20 @@ async function getOrdersStatsTimeSeries({
     return q;
   }
 
-  let statsProductOrderIds = null;
   const pidForStats = normalizeProductIdForCartFilter(product_id);
   const skuForStats = parseProductFilterInput(product_sku);
-  if (pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats) {
-    async function applyStatsBaseForProductUuidCollect(q) {
-      let x = q;
-      if (from && filterOrdersByCreatedAtInRange) {
-        x = x.gte("created_at", from.toISOString());
-      }
-      if (to && filterOrdersByCreatedAtInRange) {
-        x = x.lte("created_at", to.toISOString());
-      }
-      x = applyStatsRawContains(x, null, null);
-      if (orderIds != null && orderIds.length) {
-        x = applyOrderIdMembershipFilter(x, orderIds);
-      }
-      return x;
-    }
-    statsProductOrderIds = await collectOrderIdsUnionContainsCartProductUuid(
-      pidForStats,
-      applyStatsBaseForProductUuidCollect,
-    );
-    if (!statsProductOrderIds.length) {
-      return {
-        from: from.toISOString(),
-        to: to.toISOString(),
-        granularity: gran,
-        points: listBucketKeys(from, to, gran).map((date) => ({
-          date,
-          ...emptyTrendBucket(),
-        })),
-        summary: emptyTrendBucket(),
-        truncated: false,
-      };
-    }
-  }
+  const useProductUuidContainsTrend =
+    pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats;
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
-    if (statsProductOrderIds != null && statsProductOrderIds.length) {
-      const pset = new Set(statsProductOrderIds.map(String));
-      if (chunk && chunk.length) {
-        const merged = chunk.filter((id) => pset.has(String(id)));
-        if (!merged.length) return { nextQ: q, skip: true };
-        return {
-          nextQ: applyOrderIdMembershipFilter(q, merged),
-          skip: false,
-        };
-      }
-      return {
-        nextQ: applyOrderIdMembershipFilter(q, statsProductOrderIds),
-        skip: false,
-      };
-    }
+    let nextQ = q;
     if (chunk && chunk.length) {
-      return { nextQ: q.in("order_id", chunk), skip: false };
+      nextQ = nextQ.in("order_id", chunk);
     }
-    return { nextQ: q, skip: false };
+    if (useProductUuidContainsTrend) {
+      nextQ = applyProductUuidCartContainsOr(nextQ, pidForStats);
+    }
+    return { nextQ, skip: false };
   }
 
   const productIdForUnitSum =
@@ -2188,7 +2108,7 @@ async function getOrdersStatsTimeSeries({
         q = q.lte("created_at", to.toISOString());
       }
       q = applyStatsRawContains(q, null, null);
-      if (statsProductOrderIds == null) {
+      if (!useProductUuidContainsTrend) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
       if (listStatusFilterNorm != null) {
