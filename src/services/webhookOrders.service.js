@@ -5,6 +5,13 @@ const {
   getEgyptTrendBucketKey,
   listEgyptTrendBucketKeys,
 } = require("../utils/dateRange");
+const {
+  ORDER_REFERENCE_START,
+  ORDER_REFERENCE_EGYPT_START,
+  readOrderReferenceFromRow,
+  shouldAssignOrderReference,
+  applyOrderReferenceToRawData,
+} = require("../utils/orderReference");
 
 const ALLOWED_ORDER_STATUSES = [
   "canceled",
@@ -536,6 +543,160 @@ function resolveSourceOrderId(order) {
   return `webhook-${fingerprint}`;
 }
 
+let orderReferenceColumnAvailable = null;
+
+async function hasOrderReferenceColumn() {
+  if (orderReferenceColumnAvailable != null) {
+    return orderReferenceColumnAvailable;
+  }
+  const { error } = await supabase
+    .from(ORDERS_TABLE)
+    .select("order_reference")
+    .limit(1);
+  orderReferenceColumnAvailable = !error;
+  return orderReferenceColumnAvailable;
+}
+
+async function fetchOrderRowBySourceId(orderId) {
+  const id = String(orderId || "").trim();
+  if (!id) return null;
+  const useRefCol = await hasOrderReferenceColumn();
+  const { data, error } = await supabase
+    .from(ORDERS_TABLE)
+    .select(
+      useRefCol
+        ? "order_id, order_reference, raw_data, created_at, status"
+        : "order_id, raw_data, created_at, status",
+    )
+    .eq("order_id", id)
+    .maybeSingle();
+  if (error) {
+    throw new Error(error.message);
+  }
+  return data;
+}
+
+/** التالي في التسلسل: 1001+ للطلبات من 24/5 مصر فصاعداً */
+async function allocateNextOrderReference() {
+  if (await hasOrderReferenceColumn()) {
+    const { data, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("order_reference")
+      .gte("created_at", ORDER_REFERENCE_EGYPT_START.toISOString())
+      .not("order_reference", "is", null)
+      .order("order_reference", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!error && data?.order_reference != null) {
+      const n = Number(data.order_reference);
+      if (Number.isFinite(n)) {
+        return Math.max(Math.trunc(n) + 1, ORDER_REFERENCE_START);
+      }
+    }
+  }
+
+  let maxRef = ORDER_REFERENCE_START - 1;
+  let offset = 0;
+  for (;;) {
+    const useRefCol = await hasOrderReferenceColumn();
+    const { data: rows, error: scanErr } = await supabase
+      .from(ORDERS_TABLE)
+      .select(useRefCol ? "raw_data, order_reference" : "raw_data")
+      .gte("created_at", ORDER_REFERENCE_EGYPT_START.toISOString())
+      .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
+    if (scanErr) {
+      throw new Error(scanErr.message);
+    }
+    if (!rows?.length) {
+      break;
+    }
+    for (const row of rows) {
+      const ref = readOrderReferenceFromRow(row);
+      if (ref != null && ref > maxRef) {
+        maxRef = ref;
+      }
+    }
+    if (rows.length < LOG_SELECT_PAGE_SIZE) {
+      break;
+    }
+    offset += LOG_SELECT_PAGE_SIZE;
+  }
+
+  return Math.max(maxRef + 1, ORDER_REFERENCE_START);
+}
+
+function mapStoredOrderToClient(row) {
+  const ref = readOrderReferenceFromRow(row);
+  return {
+    ...(row.raw_data || {}),
+    sourceOrderId: row.order_id,
+    orderStatus: row.status,
+    receivedAt: row.created_at,
+    ...(ref != null
+      ? {
+          order_reference: ref,
+          orderReference: ref,
+        }
+      : {}),
+  };
+}
+
+function parseOrderReferenceInput(value) {
+  const ref = Math.trunc(Number(String(value ?? "").trim()));
+  if (!Number.isFinite(ref) || ref <= 0) {
+    const err = new Error("order_reference must be a positive number");
+    err.code = "INVALID_ORDER_REFERENCE";
+    throw err;
+  }
+  return ref;
+}
+
+/** تفاصيل طلب واحد بمعرف الطلب التسلسلي (1001+). */
+async function getWebhookOrderByReference(orderReferenceInput) {
+  const ref = parseOrderReferenceInput(orderReferenceInput);
+
+  if (await hasOrderReferenceColumn()) {
+    const { data, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("*")
+      .eq("order_reference", ref)
+      .maybeSingle();
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (data) {
+      return mapStoredOrderToClient(data);
+    }
+  }
+
+  const { data: rows, error } = await supabase
+    .from(ORDERS_TABLE)
+    .select("*")
+    .or(
+      `raw_data->>order_reference.eq.${ref},raw_data->>orderReference.eq.${ref}`,
+    )
+    .limit(2);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (!rows?.length) {
+    const notFound = new Error("Order not found");
+    notFound.code = "ORDER_NOT_FOUND";
+    throw notFound;
+  }
+
+  if (rows.length > 1) {
+    const ambiguous = new Error("Multiple orders match this order_reference");
+    ambiguous.code = "ORDER_REFERENCE_AMBIGUOUS";
+    throw ambiguous;
+  }
+
+  return mapStoredOrderToClient(rows[0]);
+}
+
 async function addWebhookOrder(order, options = {}) {
   const { fromWebhook, actor } = options;
   const sourceOrderId = resolveSourceOrderId(order);
@@ -564,29 +725,59 @@ async function addWebhookOrder(order, options = {}) {
     }
   }
 
+  const existingRow = await fetchOrderRowBySourceId(sourceOrderId);
+  const createdAt = existingRow?.created_at
+    ? new Date(existingRow.created_at)
+    : new Date();
+
+  let orderReference = readOrderReferenceFromRow(existingRow);
+  if (orderReference == null && shouldAssignOrderReference(createdAt)) {
+    orderReference = await allocateNextOrderReference();
+  }
+
+  if (orderReference != null) {
+    Object.assign(raw_data, applyOrderReferenceToRawData({}, orderReference));
+  }
+
   const payload = {
     order_id: sourceOrderId,
-    status: "new",
+    status: existingRow?.status || "new",
     raw_data,
-    created_at: new Date().toISOString(),
+    created_at: createdAt.toISOString(),
   };
+  if (orderReference != null && (await hasOrderReferenceColumn())) {
+    payload.order_reference = orderReference;
+  }
 
-  const { data, error } = await supabase
-    .from(ORDERS_TABLE)
-    .upsert(payload, { onConflict: "order_id" })
-    .select()
-    .single();
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { data, error } = await supabase
+      .from(ORDERS_TABLE)
+      .upsert(payload, { onConflict: "order_id" })
+      .select()
+      .single();
 
-  if (error) {
+    if (!error) {
+      return mapStoredOrderToClient(data);
+    }
+
+    const dup =
+      String(error.message || "").includes("duplicate") ||
+      String(error.code || "") === "23505";
+    if (dup && orderReference != null && attempt < 2) {
+      orderReference = await allocateNextOrderReference();
+      payload.order_reference = orderReference;
+      payload.raw_data = applyOrderReferenceToRawData(payload.raw_data, orderReference);
+      lastError = error;
+      continue;
+    }
+
     throw new Error(error.message);
   }
 
-  return {
-    ...(data.raw_data || {}),
-    sourceOrderId: data.order_id,
-    orderStatus: data.status,
-    receivedAt: data.created_at,
-  };
+  if (lastError) {
+    throw new Error(lastError.message);
+  }
 }
 
 /** For embedding a JSON string value inside PostgREST `raw_data.cs.{...}` fragments. */
@@ -863,12 +1054,7 @@ async function getWebhookOrders({
     limit,
     total,
     totalPages: Math.ceil(total / limit) || 1,
-    data: rows.map((entry) => ({
-      ...(entry.raw_data || {}),
-      sourceOrderId: entry.order_id,
-      orderStatus: entry.status,
-      receivedAt: entry.created_at,
-    })),
+    data: rows.map((entry) => mapStoredOrderToClient(entry)),
   };
 }
 
@@ -917,12 +1103,7 @@ async function updateOrderStatus(orderId, status, changedBy) {
     changedBy,
   });
 
-  return {
-    ...(data.raw_data || {}),
-    sourceOrderId: data.order_id,
-    orderStatus: data.status,
-    receivedAt: data.created_at,
-  };
+  return mapStoredOrderToClient(data);
 }
 
 async function editOrder(orderId, updates, actor) {
@@ -1104,12 +1285,7 @@ async function editOrder(orderId, updates, actor) {
     });
   }
 
-  return {
-    ...(data.raw_data || {}),
-    sourceOrderId: data.order_id,
-    orderStatus: data.status,
-    receivedAt: data.created_at,
-  };
+  return mapStoredOrderToClient(data);
 }
 
 const STATS_STATUS_KEYS = {
@@ -2187,6 +2363,7 @@ async function getOrdersStatsTimeSeries({
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
+  getWebhookOrderByReference,
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,

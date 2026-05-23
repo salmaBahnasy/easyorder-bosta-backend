@@ -8,7 +8,8 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "delete-all-orders": "node scripts/delete-all-orders.js",
-    "bosta-locations:sql": "node scripts/setup-bosta-locations-tables.js"
+    "bosta-locations:sql": "node scripts/setup-bosta-locations-tables.js",
+    "backfill-order-references": "node scripts/backfill-order-references.js --yes"
   },
   "keywords": [],
   "author": "",

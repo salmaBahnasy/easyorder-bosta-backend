@@ -5,6 +5,7 @@ const {
   createOrder,
   updateOrder,
   getOrders,
+  getOrderByReference,
   changeOrderStatus,
   sendOrderToBosta,
   getEasyOrderDetails,
@@ -17,6 +18,8 @@ const { requireAuth, optionalAuth } = require("../middlewares/auth.middleware");
 router.get("/stats/trend", getOrdersStatsTrend);
 router.get("/stats", getOrdersStats);
 router.get("/analytics", getOrdersAnalytics);
+router.get("/reference/:orderReference", getOrderByReference);
+router.get("/reference", getOrderByReference);
 router.post("/", optionalAuth, createOrder);
 router.patch("/:orderId", requireAuth, updateOrder);
 router.get("/", getOrders);

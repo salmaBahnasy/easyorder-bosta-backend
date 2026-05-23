@@ -8,6 +8,7 @@ const {
   getOrdersStatistics,
   getOrdersStatsTimeSeries,
   getOrdersAnalyticsReport,
+  getWebhookOrderByReference,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
   ORDER_TYPES,
@@ -521,6 +522,74 @@ async function updateOrder(req, res) {
   }
 }
 
+/**
+ * GET /api/orders/reference/:orderReference
+ * GET /api/orders/reference?order_reference=1001
+ * Returns order from our DB by sequential order_reference (1001+).
+ */
+async function getOrderByReference(req, res) {
+  try {
+    const rawRef =
+      req.params.orderReference ??
+      req.query.order_reference ??
+      req.query.orderReference;
+
+    if (rawRef == null || String(rawRef).trim() === "") {
+      res.status(400).json({
+        success: false,
+        message: "order_reference is required",
+      });
+      return;
+    }
+
+    const order = await getWebhookOrderByReference(rawRef);
+
+    if (req.query.presented === "true") {
+      const presented = toPresentation(order);
+      res.json({
+        success: true,
+        order_reference: order.order_reference ?? order.orderReference,
+        data: presented || order,
+      });
+      return;
+    }
+
+    res.json({
+      success: true,
+      order_reference: order.order_reference ?? order.orderReference,
+      data: order,
+    });
+  } catch (error) {
+    if (error.code === "INVALID_ORDER_REFERENCE") {
+      res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    if (error.code === "ORDER_NOT_FOUND") {
+      res.status(404).json({
+        success: false,
+        message: "Order not found",
+        order_reference: req.params.orderReference ?? req.query.order_reference,
+      });
+      return;
+    }
+    if (error.code === "ORDER_REFERENCE_AMBIGUOUS") {
+      res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch order by reference",
+      error: error.message,
+    });
+  }
+}
+
 async function getEasyOrderDetails(req, res) {
   try {
     const { orderId } = req.params;
@@ -976,6 +1045,7 @@ module.exports = {
   createOrder,
   updateOrder,
   getOrders,
+  getOrderByReference,
   changeOrderStatus,
   sendOrderToBosta,
   getEasyOrderDetails,
