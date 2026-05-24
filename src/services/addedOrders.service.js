@@ -25,10 +25,24 @@ function sanitizeIlikeNeedle(value) {
   return s.replace(/[%_\\,(){}]/g, "");
 }
 
+/** نمط ILIKE لأعمدة text (PostgREST .ilike يستخدم * كبديل %). */
 function postgrestIlikeStarWrap(needle) {
   const n = sanitizeIlikeNeedle(needle);
   if (!n) return null;
   return `*${n.replace(/\*/g, "\\*")}*`;
+}
+
+/** نمط ILIKE لـ jsonb::text عبر .filter (SQL يستخدم %). */
+function postgrestIlikePercentWrap(needle) {
+  const n = sanitizeIlikeNeedle(needle);
+  if (!n) return null;
+  return `%${n}%`;
+}
+
+function parseProductNameFilter(productName) {
+  const n = pickString(productName);
+  if (!n || /^(undefined|null)$/i.test(n)) return null;
+  return n;
 }
 
 function escapeIlikeLiteral(value) {
@@ -294,7 +308,9 @@ async function listAddedOrders({
     return emptyListResult(safePage, safeLimit);
   }
 
-  const productPattern = postgrestIlikeStarWrap(productName);
+  const productPattern = postgrestIlikePercentWrap(
+    parseProductNameFilter(productName),
+  );
 
   let query = supabase
     .from(ADDED_ORDERS_TABLE)
@@ -305,7 +321,7 @@ async function listAddedOrders({
   }
 
   if (productPattern) {
-    query = query.ilike("products", productPattern);
+    query = query.filter("products::text", "ilike", productPattern);
   }
 
   if (from) {
@@ -333,7 +349,7 @@ async function listAddedOrders({
     totalPages: Math.ceil((count || 0) / safeLimit) || 1,
     filters: {
       employeeId: resolvedEmployeeId || null,
-      productName: sanitizeIlikeNeedle(productName) || null,
+      productName: parseProductNameFilter(productName),
     },
     data: rows.map((row) => formatAddedOrderView(row, employeeById)),
   };
