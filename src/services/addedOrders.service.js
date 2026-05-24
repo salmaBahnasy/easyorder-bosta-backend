@@ -376,48 +376,8 @@ async function listAddedOrders({
   const productNeedleLower = productNameFilter
     ? productNameFilter.toLowerCase()
     : null;
-  const productPattern = productNameFilter
-    ? postgrestIlikeStarWrap(productNameFilter)
-    : null;
 
   if (productNeedleLower) {
-    if (productPattern) {
-      let q = supabase
-        .from(ADDED_ORDERS_TABLE)
-        .select("*", { count: "exact" });
-      q = applyAddedOrdersBaseFilters(q, { resolvedEmployeeId, from, to });
-      q = q.ilike("products_names", productPattern);
-      q = q.order("created_at", { ascending: false }).range(fromIndex, toIndex);
-
-      const { data, count, error } = await q;
-      if (!error) {
-        const rows = data || [];
-        const employeeIds = rows.map((row) =>
-          pickString(row.added_by_employee_id),
-        );
-        const employeeById = await fetchEmployeesByIds(employeeIds);
-        return {
-          page: safePage,
-          limit: safeLimit,
-          total: count || 0,
-          totalPages: Math.ceil((count || 0) / safeLimit) || 1,
-          filters: {
-            employeeId: resolvedEmployeeId || null,
-            productName: productNameFilter,
-          },
-          data: rows.map((row) => formatAddedOrderView(row, employeeById)),
-        };
-      }
-
-      const msg = String(error.message || "");
-      const missingColumn =
-        msg.includes("products_names") || msg.includes("schema cache");
-      const jsonbIlike = msg.includes("jsonb") && msg.includes("~~");
-      if (!missingColumn && !jsonbIlike) {
-        throw enrichAddedOrdersDbError(error);
-      }
-    }
-
     return listAddedOrdersWithProductFilterInMemory({
       safePage,
       safeLimit,

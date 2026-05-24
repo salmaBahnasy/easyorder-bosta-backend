@@ -107,7 +107,8 @@ async function getAddedOrders(req, res) {
       req.query.product ||
         req.query.product_name ||
         req.query.productName ||
-        req.query.q,
+        req.query.q ||
+        req.query.search,
     );
 
     const result = await listAddedOrders({
