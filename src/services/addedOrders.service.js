@@ -32,17 +32,27 @@ function postgrestIlikeStarWrap(needle) {
   return `*${n.replace(/\*/g, "\\*")}*`;
 }
 
-/** نمط ILIKE لـ jsonb::text عبر .filter (SQL يستخدم %). */
-function postgrestIlikePercentWrap(needle) {
-  const n = sanitizeIlikeNeedle(needle);
-  if (!n) return null;
-  return `%${n}%`;
-}
-
 function parseProductNameFilter(productName) {
   const n = pickString(productName);
   if (!n || /^(undefined|null)$/i.test(n)) return null;
   return n;
+}
+
+function buildProductsNames(products) {
+  if (!Array.isArray(products) || !products.length) return "";
+  return products
+    .map((p) => pickString(p?.name))
+    .filter(Boolean)
+    .join(" ");
+}
+
+function rowMatchesProductName(row, needleLower) {
+  if (!needleLower) return true;
+  const flat = pickString(row?.products_names).toLowerCase();
+  if (flat && flat.includes(needleLower)) return true;
+  return normalizeProductsArray(row?.products).some((p) =>
+    pickString(p.name).toLowerCase().includes(needleLower),
+  );
 }
 
 function escapeIlikeLiteral(value) {
@@ -267,6 +277,7 @@ async function createAddedOrder({ customerName, phone, products, totalCost, acto
     customer_name: name,
     phone: phoneValue,
     products: normalizedProducts,
+    products_names: buildProductsNames(normalizedProducts),
     total_cost: finalTotal,
   };
 
@@ -282,6 +293,59 @@ async function createAddedOrder({ customerName, phone, products, totalCost, acto
 
   const employeeById = await fetchEmployeesByIds([employeeId]);
   return formatAddedOrderView(data, employeeById);
+}
+
+function applyAddedOrdersBaseFilters(query, { resolvedEmployeeId, from, to }) {
+  let q = query;
+  if (resolvedEmployeeId) {
+    q = q.eq("added_by_employee_id", resolvedEmployeeId);
+  }
+  if (from) {
+    q = q.gte("created_at", new Date(from).toISOString());
+  }
+  if (to) {
+    q = q.lte("created_at", new Date(to).toISOString());
+  }
+  return q;
+}
+
+async function listAddedOrdersWithProductFilterInMemory({
+  safePage,
+  safeLimit,
+  resolvedEmployeeId,
+  from,
+  to,
+  productNeedleLower,
+  productNameFilter,
+}) {
+  let q = supabase.from(ADDED_ORDERS_TABLE).select("*");
+  q = applyAddedOrdersBaseFilters(q, { resolvedEmployeeId, from, to });
+  q = q.order("created_at", { ascending: false });
+
+  const { data, error } = await q;
+  if (error) {
+    throw enrichAddedOrdersDbError(error);
+  }
+
+  const filtered = (data || []).filter((row) =>
+    rowMatchesProductName(row, productNeedleLower),
+  );
+  const fromIndex = (safePage - 1) * safeLimit;
+  const pageRows = filtered.slice(fromIndex, fromIndex + safeLimit);
+  const employeeIds = pageRows.map((row) => pickString(row.added_by_employee_id));
+  const employeeById = await fetchEmployeesByIds(employeeIds);
+
+  return {
+    page: safePage,
+    limit: safeLimit,
+    total: filtered.length,
+    totalPages: Math.ceil(filtered.length / safeLimit) || 1,
+    filters: {
+      employeeId: resolvedEmployeeId || null,
+      productName: productNameFilter,
+    },
+    data: pageRows.map((row) => formatAddedOrderView(row, employeeById)),
+  };
 }
 
 async function listAddedOrders({
@@ -308,29 +372,67 @@ async function listAddedOrders({
     return emptyListResult(safePage, safeLimit);
   }
 
-  const productPattern = postgrestIlikePercentWrap(
-    parseProductNameFilter(productName),
-  );
+  const productNameFilter = parseProductNameFilter(productName);
+  const productNeedleLower = productNameFilter
+    ? productNameFilter.toLowerCase()
+    : null;
+  const productPattern = productNameFilter
+    ? postgrestIlikeStarWrap(productNameFilter)
+    : null;
+
+  if (productNeedleLower) {
+    if (productPattern) {
+      let q = supabase
+        .from(ADDED_ORDERS_TABLE)
+        .select("*", { count: "exact" });
+      q = applyAddedOrdersBaseFilters(q, { resolvedEmployeeId, from, to });
+      q = q.ilike("products_names", productPattern);
+      q = q.order("created_at", { ascending: false }).range(fromIndex, toIndex);
+
+      const { data, count, error } = await q;
+      if (!error) {
+        const rows = data || [];
+        const employeeIds = rows.map((row) =>
+          pickString(row.added_by_employee_id),
+        );
+        const employeeById = await fetchEmployeesByIds(employeeIds);
+        return {
+          page: safePage,
+          limit: safeLimit,
+          total: count || 0,
+          totalPages: Math.ceil((count || 0) / safeLimit) || 1,
+          filters: {
+            employeeId: resolvedEmployeeId || null,
+            productName: productNameFilter,
+          },
+          data: rows.map((row) => formatAddedOrderView(row, employeeById)),
+        };
+      }
+
+      const msg = String(error.message || "");
+      const missingColumn =
+        msg.includes("products_names") || msg.includes("schema cache");
+      const jsonbIlike = msg.includes("jsonb") && msg.includes("~~");
+      if (!missingColumn && !jsonbIlike) {
+        throw enrichAddedOrdersDbError(error);
+      }
+    }
+
+    return listAddedOrdersWithProductFilterInMemory({
+      safePage,
+      safeLimit,
+      resolvedEmployeeId,
+      from,
+      to,
+      productNeedleLower,
+      productNameFilter,
+    });
+  }
 
   let query = supabase
     .from(ADDED_ORDERS_TABLE)
     .select("*", { count: "exact" });
-
-  if (resolvedEmployeeId) {
-    query = query.eq("added_by_employee_id", resolvedEmployeeId);
-  }
-
-  if (productPattern) {
-    query = query.filter("products::text", "ilike", productPattern);
-  }
-
-  if (from) {
-    query = query.gte("created_at", new Date(from).toISOString());
-  }
-  if (to) {
-    query = query.lte("created_at", new Date(to).toISOString());
-  }
-
+  query = applyAddedOrdersBaseFilters(query, { resolvedEmployeeId, from, to });
   query = query.order("created_at", { ascending: false }).range(fromIndex, toIndex);
 
   const { data, count, error } = await query;
@@ -349,7 +451,7 @@ async function listAddedOrders({
     totalPages: Math.ceil((count || 0) / safeLimit) || 1,
     filters: {
       employeeId: resolvedEmployeeId || null,
-      productName: parseProductNameFilter(productName),
+      productName: null,
     },
     data: rows.map((row) => formatAddedOrderView(row, employeeById)),
   };
