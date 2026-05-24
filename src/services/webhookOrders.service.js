@@ -430,21 +430,40 @@ async function collectOrderIdsUnionContainsCartProductUuid(
  * طلبات يظهر في raw_data أن هذا الموظف عالجها (PATCH) — حقول من الواجهة مثل
  * modifier_employee_id / updated_by_employee_id / الإيميلات.
  * يُكمّل order_status_logs التي تُسجَّل فقط عند تغيير status.
+ *
+ * مع from/to: نُقيّد بـ orders.created_at لكل حقول الموظف في raw_data
+ * (تعديل بدون تغيير status لا يُسجَّل في order_status_logs).
  */
 async function fetchOrderIdsFromRawDataEmployeeMarkers({
   employeeKey,
   employeeRawInput,
+  from,
+  to,
+  ignoreDateRange = false,
 }) {
   const ids = new Set();
+  const boundByCreatedAt = !ignoreDateRange && (from || to);
+
+  function applyCreatedAtBounds(q) {
+    let next = q;
+    if (boundByCreatedAt) {
+      if (from) {
+        next = next.gte("created_at", from.toISOString());
+      }
+      if (to) {
+        next = next.lte("created_at", to.toISOString());
+      }
+    }
+    return next;
+  }
 
   async function addAllOrderIdsEqJsonKey(jsonKey, value) {
     let offset = 0;
     for (;;) {
       const col = `raw_data->>${jsonKey}`;
-      const { data, error } = await supabase
-        .from(ORDERS_TABLE)
-        .select("order_id")
-        .eq(col, value)
+      let q = supabase.from(ORDERS_TABLE).select("order_id").eq(col, value);
+      q = applyCreatedAtBounds(q);
+      const { data, error } = await q
         .order("created_at", { ascending: false })
         .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
       if (error) {
@@ -462,10 +481,9 @@ async function fetchOrderIdsFromRawDataEmployeeMarkers({
   }
 
   if (UUID_LIKE.test(employeeKey)) {
-    await addAllOrderIdsEqJsonKey("modifier_employee_id", employeeKey);
-    await addAllOrderIdsEqJsonKey("updated_by_employee_id", employeeKey);
-    await addAllOrderIdsEqJsonKey("created_by_employee_id", employeeKey);
-    await addAllOrderIdsEqJsonKey("assigned_employee_id", employeeKey);
+    for (const jsonKey of EMPLOYEE_RAW_ID_KEYS) {
+      await addAllOrderIdsEqJsonKey(jsonKey, employeeKey);
+    }
   }
 
   const raw = String(employeeRawInput || "").trim();
@@ -474,12 +492,14 @@ async function fetchOrderIdsFromRawDataEmployeeMarkers({
     if (p) {
       let offset = 0;
       for (;;) {
-        const { data, error } = await supabase
+        let q = supabase
           .from(ORDERS_TABLE)
           .select("order_id")
           .or(
             `raw_data->>updated_by_email.ilike.${p},raw_data->>user_email.ilike.${p}`,
-          )
+          );
+        q = applyCreatedAtBounds(q);
+        const { data, error } = await q
           .order("created_at", { ascending: false })
           .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
         if (error) {
@@ -498,6 +518,72 @@ async function fetchOrderIdsFromRawDataEmployeeMarkers({
   }
 
   return [...ids];
+}
+
+/** مع from/to: نفلتر orders.created_at مع فلتر الموظف (مثل analytics). */
+function shouldFilterOrdersByCreatedAtWithEmployee({
+  from,
+  to,
+  employeeId,
+  ignoreEmployeeLogDateRange,
+}) {
+  if (!employeeId) return true;
+  if (ignoreEmployeeLogDateRange) return false;
+  return Boolean(from || to);
+}
+
+async function resolveEmployeeScopedOrderIds({
+  employeeId,
+  from,
+  to,
+  ignoreEmployeeLogDateRange = false,
+}) {
+  const changedByKey = await resolveEmployeeToIdForLogs(employeeId);
+  if (String(employeeId).trim().includes("@") && !changedByKey) {
+    return {
+      orderIds: [],
+      logOrderIds: new Set(),
+      employeeKey: null,
+      employeeEmail: null,
+      notFound: true,
+    };
+  }
+
+  const keyForLogs = changedByKey || String(employeeId).trim();
+  const rawInput = String(employeeId).trim();
+  const fromLogs = await fetchDistinctOrderIdsFromLogs({
+    changedByKey: keyForLogs,
+    from,
+    to,
+    ignoreDateRange: ignoreEmployeeLogDateRange,
+  });
+  const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
+    employeeKey: keyForLogs,
+    employeeRawInput: rawInput,
+    from,
+    to,
+    ignoreDateRange: ignoreEmployeeLogDateRange,
+  });
+
+  let employeeEmail = rawInput.includes("@") ? rawInput : null;
+  if (!employeeEmail && UUID_LIKE.test(keyForLogs)) {
+    const { data: empRow } = await supabase
+      .from(EMPLOYEES_TABLE)
+      .select("email")
+      .eq("id", keyForLogs)
+      .maybeSingle();
+    if (empRow?.email) {
+      employeeEmail = String(empRow.email).trim();
+    }
+  }
+
+  return {
+    orderIds: [...new Set([...fromLogs, ...fromRawMarkers])],
+    logOrderIds: new Set(fromLogs),
+    employeeKey: keyForLogs,
+    employeeEmail,
+    notFound: false,
+  };
 }
 
 async function insertOrderStatusLog({
@@ -843,11 +929,23 @@ function applyProductUuidCartContainsOr(query, productUuid) {
       `raw_data.cs.{"cart_items":[{"product_id":"${e}"}]}`,
       `raw_data.cs.{"cart_items":[{"productId":"${e}"}]}`,
       `raw_data.cs.{"cart_items":[{"id":"${e}"}]}`,
+      `raw_data.cs.{"cart_items":[{"easyorder_id":"${e}"}]}`,
+      `raw_data.cs.{"cart_items":[{"easyorderId":"${e}"}]}`,
       `raw_data.cs.{"cart_items":[{"product":{"id":"${e}"}}]}`,
       `raw_data.cs.{"cart_items":[{"product":{"product_id":"${e}"}}]}`,
+      `raw_data.cs.{"cart_items":[{"product":{"productId":"${e}"}}]}`,
+      `raw_data.cs.{"cart_items":[{"product":{"easyorder_id":"${e}"}}]}`,
+      `raw_data.cs.{"cart_items":[{"product":{"easyorderId":"${e}"}}]}`,
       `raw_data.cs.{"cartItems":[{"product_id":"${e}"}]}`,
       `raw_data.cs.{"cartItems":[{"productId":"${e}"}]}`,
+      `raw_data.cs.{"cartItems":[{"id":"${e}"}]}`,
+      `raw_data.cs.{"cartItems":[{"easyorder_id":"${e}"}]}`,
+      `raw_data.cs.{"cartItems":[{"easyorderId":"${e}"}]}`,
       `raw_data.cs.{"cartItems":[{"product":{"id":"${e}"}}]}`,
+      `raw_data.cs.{"cartItems":[{"product":{"product_id":"${e}"}}]}`,
+      `raw_data.cs.{"cartItems":[{"product":{"productId":"${e}"}}]}`,
+      `raw_data.cs.{"cartItems":[{"product":{"easyorder_id":"${e}"}}]}`,
+      `raw_data.cs.{"cartItems":[{"product":{"easyorderId":"${e}"}}]}`,
     ].join(","),
   );
 }
@@ -902,12 +1000,23 @@ async function getWebhookOrders({
   const fromIndex = (page - 1) * limit;
   const toIndex = fromIndex + limit - 1;
   let orderIdsByEmployee = null;
-  /** عند فلتر الموظف: لا نفلتر orders.created_at (الفترة تُطبَّق على سجلات النشاط فقط). */
-  let skipOrderCreatedAtRange = false;
+  const skipOrderCreatedAtRange = !shouldFilterOrdersByCreatedAtWithEmployee({
+    from,
+    to,
+    employeeId,
+    ignoreEmployeeLogDateRange,
+  });
+
+  let employeeScope = null;
 
   if (employeeId) {
-    const changedByKey = await resolveEmployeeToIdForLogs(employeeId);
-    if (String(employeeId).trim().includes("@") && !changedByKey) {
+    const scoped = await resolveEmployeeScopedOrderIds({
+      employeeId,
+      from,
+      to,
+      ignoreEmployeeLogDateRange,
+    });
+    if (scoped.notFound) {
       return {
         page,
         limit,
@@ -917,20 +1026,15 @@ async function getWebhookOrders({
       };
     }
 
-    const keyForLogs = changedByKey || String(employeeId).trim();
-
-    const fromLogs = await fetchDistinctOrderIdsFromLogs({
-      changedByKey: keyForLogs,
-      from,
-      to,
-      ignoreDateRange: ignoreEmployeeLogDateRange,
-    });
-    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
-      employeeKey: keyForLogs,
-      employeeRawInput: String(employeeId).trim(),
-    });
-    orderIdsByEmployee = [...new Set([...fromLogs, ...fromRawMarkers])];
-    skipOrderCreatedAtRange = true;
+    employeeScope = {
+      logOrderIds: scoped.logOrderIds,
+      employeeKey: scoped.employeeKey,
+      employeeEmail: scoped.employeeEmail,
+    };
+    orderIdsByEmployee = await filterOrderIdsForEmployeeScope(
+      scoped.orderIds,
+      employeeScope,
+    );
 
     if (!orderIdsByEmployee.length) {
       return {
@@ -1298,6 +1402,78 @@ const STATS_STATUS_KEYS = {
   new: "new",
 };
 
+/** حالات تُحسب في totalOrders / trend (طلبات المتجر قد تأتي pending قبل new). */
+const STATS_COUNTABLE_DB_STATUSES = [...ALLOWED_ORDER_STATUSES, "pending"];
+
+function dbStatusesForStatsBucket(statsKey) {
+  const db = STATS_STATUS_KEYS[statsKey];
+  if (!db) return [];
+  if (statsKey === "new") return ["new", "pending"];
+  return [db];
+}
+
+const EMPLOYEE_RAW_ID_KEYS = [
+  "modifier_employee_id",
+  "updated_by_employee_id",
+  "updatedByEmployeeId",
+  "created_by_employee_id",
+  "createdByEmployeeId",
+  "assigned_employee_id",
+];
+
+function rawDataShowsEmployeeTouch(raw, employeeKey, employeeEmail) {
+  if (!raw || typeof raw !== "object") return false;
+  const id = String(employeeKey || "").trim();
+  if (id) {
+    for (const key of EMPLOYEE_RAW_ID_KEYS) {
+      if (String(raw[key] || "").trim() === id) return true;
+    }
+  }
+  const email = String(employeeEmail || "").trim().toLowerCase();
+  if (!email) return false;
+  for (const key of ["updated_by_email", "user_email", "created_by_email"]) {
+    if (String(raw[key] || "").trim().toLowerCase() === email) return true;
+  }
+  return false;
+}
+
+function orderRowCountsForEmployeeScope(row, employeeScope) {
+  if (!employeeScope) return true;
+  const raw =
+    row?.raw_data && typeof row.raw_data === "object" && !Array.isArray(row.raw_data)
+      ? row.raw_data
+      : {};
+  const orderId = String(row?.order_id || raw?.id || raw?.sourceOrderId || "").trim();
+  if (orderId && employeeScope.logOrderIds.has(orderId)) return true;
+  return rawDataShowsEmployeeTouch(
+    raw,
+    employeeScope.employeeKey,
+    employeeScope.employeeEmail,
+  );
+}
+
+async function filterOrderIdsForEmployeeScope(orderIds, employeeScope) {
+  if (!employeeScope || !Array.isArray(orderIds) || !orderIds.length) {
+    return orderIds || [];
+  }
+  const kept = [];
+  for (const chunk of chunkArray(orderIds, IN_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("order_id,raw_data")
+      .in("order_id", chunk);
+    if (error) {
+      throw new Error(error.message);
+    }
+    for (const row of data || []) {
+      if (orderRowCountsForEmployeeScope(row, employeeScope)) {
+        kept.push(String(row.order_id).trim());
+      }
+    }
+  }
+  return kept;
+}
+
 const IN_CHUNK_SIZE = 120;
 
 function chunkArray(arr, size) {
@@ -1399,7 +1575,8 @@ function buildEmptyStatsBreakdownResponse() {
  * Order counts by orders.status with the same filters as the list (employee, meta,
  * product, optional status). employeeId uses logs + raw_data markers like getWebhookOrders.
  * status filter narrows the universe; other status buckets are zero.
- * from/to on orders.created_at unless employee resolution uses log dates only for the id set.
+ * from/to on orders.created_at when set (including with employeeId); employee_scope=all_time
+ * skips order created_at and uses unbounded logs/markers.
  */
 async function getOrdersStatistics({
   employeeId,
@@ -1414,31 +1591,33 @@ async function getOrdersStatistics({
   product_sku,
 }) {
   let orderIds = null;
-  let filterOrdersByCreatedAtInRange = true;
+  let employeeScope = null;
+  const filterOrdersByCreatedAtInRange =
+    shouldFilterOrdersByCreatedAtWithEmployee({
+      from,
+      to,
+      employeeId,
+      ignoreEmployeeLogDateRange,
+    });
 
-  const employeeKey =
-    typeof employeeId === "string" ? employeeId.trim() : employeeId;
-
-  if (employeeKey) {
-    const changedByKey = await resolveEmployeeToIdForLogs(employeeKey);
-    if (String(employeeKey).includes("@") && !changedByKey) {
+  if (employeeId) {
+    const scoped = await resolveEmployeeScopedOrderIds({
+      employeeId,
+      from,
+      to,
+      ignoreEmployeeLogDateRange,
+    });
+    if (scoped.notFound) {
       return buildEmptyStatsBreakdownResponse();
     }
 
-    const keyForLogs = changedByKey || String(employeeKey);
-
-    const fromLogs = await fetchDistinctOrderIdsFromLogs({
-      changedByKey: keyForLogs,
-      from,
-      to,
-      ignoreDateRange: ignoreEmployeeLogDateRange,
-    });
-    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
-      employeeKey: keyForLogs,
-      employeeRawInput: String(employeeKey).trim(),
-    });
-    orderIds = [...new Set([...fromLogs, ...fromRawMarkers])];
-    filterOrdersByCreatedAtInRange = false;
+    orderIds = scoped.orderIds;
+    employeeScope = {
+      logOrderIds: scoped.logOrderIds,
+      employeeKey: scoped.employeeKey,
+      employeeEmail: scoped.employeeEmail,
+    };
+    orderIds = await filterOrderIdsForEmployeeScope(orderIds, employeeScope);
 
     if (!orderIds.length) {
       return buildEmptyStatsBreakdownResponse();
@@ -1504,9 +1683,7 @@ async function getOrdersStatistics({
     const { onlyOrderStatus } = options;
     let sum = 0;
     for (const chunk of chunks) {
-      let q = supabase
-        .from(ORDERS_TABLE)
-        .select("*", { count: "exact", head: true });
+      let q = supabase.from(ORDERS_TABLE).select("order_id,raw_data,status");
 
       const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
       if (scoped.skip) continue;
@@ -1525,29 +1702,52 @@ async function getOrdersStatistics({
       if (onlyOrderStatus) {
         q = q.eq("status", onlyOrderStatus);
       } else if (listStatusFilterNorm != null) {
-        q = q.eq("status", listStatusFilterNorm);
+        const statuses =
+          listStatusFilterNorm === "pending"
+            ? ["new", "pending"]
+            : [listStatusFilterNorm];
+        q = q.in("status", statuses);
+      } else {
+        q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
       }
 
-      const { count, error } = await q;
-      if (error) throw new Error(error.message);
-      sum += count || 0;
+      let offset = 0;
+      for (;;) {
+        const { data, error } = await q.range(
+          offset,
+          offset + LOG_SELECT_PAGE_SIZE - 1,
+        );
+        if (error) throw new Error(error.message);
+        if (!data?.length) break;
+
+        for (const row of data) {
+          if (orderRowCountsForEmployeeScope(row, employeeScope)) {
+            sum += 1;
+          }
+        }
+
+        if (data.length < LOG_SELECT_PAGE_SIZE) break;
+        offset += LOG_SELECT_PAGE_SIZE;
+      }
     }
     return sum;
   }
 
-  async function countWithChunks(dbStatusForKey) {
+  async function countWithChunks(statsKey) {
+    const dbStatuses = dbStatusesForStatsBucket(statsKey);
+    if (!dbStatuses.length) return 0;
+
     if (
       listStatusFilterNorm != null &&
-      listStatusFilterNorm !== dbStatusForKey
+      !dbStatuses.includes(listStatusFilterNorm) &&
+      !(listStatusFilterNorm === "pending" && statsKey === "new")
     ) {
       return 0;
     }
 
     let sum = 0;
     for (const chunk of chunks) {
-      let q = supabase
-        .from(ORDERS_TABLE)
-        .select("*", { count: "exact", head: true });
+      let q = supabase.from(ORDERS_TABLE).select("order_id,raw_data,status");
 
       const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
       if (scoped.skip) continue;
@@ -1563,25 +1763,38 @@ async function getOrdersStatistics({
       if (!useProductUuidContains) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
-      q = q.eq("status", dbStatusForKey);
+      q = q.in("status", dbStatuses);
 
-      const { count, error } = await q;
-      if (error) throw new Error(error.message);
-      sum += count || 0;
+      let offset = 0;
+      for (;;) {
+        const { data, error } = await q.range(
+          offset,
+          offset + LOG_SELECT_PAGE_SIZE - 1,
+        );
+        if (error) throw new Error(error.message);
+        if (!data?.length) break;
+
+        for (const row of data) {
+          if (orderRowCountsForEmployeeScope(row, employeeScope)) {
+            sum += 1;
+          }
+        }
+
+        if (data.length < LOG_SELECT_PAGE_SIZE) break;
+        offset += LOG_SELECT_PAGE_SIZE;
+      }
     }
     return sum;
   }
 
   const byStatus = {};
-  for (const [key, dbStatus] of Object.entries(STATS_STATUS_KEYS)) {
-    byStatus[key] = await countWithChunks(dbStatus);
+  for (const key of Object.keys(STATS_STATUS_KEYS)) {
+    byStatus[key] = await countWithChunks(key);
   }
 
   let totalOrders = 0;
   for (const chunk of chunks) {
-    let q = supabase
-      .from(ORDERS_TABLE)
-      .select("*", { count: "exact", head: true });
+    let q = supabase.from(ORDERS_TABLE).select("order_id,raw_data,status");
 
     const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
     if (scoped.skip) continue;
@@ -1598,12 +1811,33 @@ async function getOrdersStatistics({
       q = applyProductCartIlikeFilters(q, { product_id, product_sku });
     }
     if (listStatusFilterNorm != null) {
-      q = q.eq("status", listStatusFilterNorm);
+      const statuses =
+        listStatusFilterNorm === "pending"
+          ? ["new", "pending"]
+          : [listStatusFilterNorm];
+      q = q.in("status", statuses);
+    } else {
+      q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
     }
 
-    const { count, error } = await q;
-    if (error) throw new Error(error.message);
-    totalOrders += count || 0;
+    let offset = 0;
+    for (;;) {
+      const { data, error } = await q.range(
+        offset,
+        offset + LOG_SELECT_PAGE_SIZE - 1,
+      );
+      if (error) throw new Error(error.message);
+      if (!data?.length) break;
+
+      for (const row of data) {
+        if (orderRowCountsForEmployeeScope(row, employeeScope)) {
+          totalOrders += 1;
+        }
+      }
+
+      if (data.length < LOG_SELECT_PAGE_SIZE) break;
+      offset += LOG_SELECT_PAGE_SIZE;
+    }
   }
 
   const byOrderSource = {};
@@ -1682,6 +1916,9 @@ async function getOrdersStatistics({
       if (!data || data.length === 0) break;
 
       for (const row of data) {
+        if (!orderRowCountsForEmployeeScope(row, employeeScope)) {
+          continue;
+        }
         const raw =
           row.raw_data &&
           typeof row.raw_data === "object" &&
@@ -1912,24 +2149,17 @@ async function fetchAnalyticsOrderRows({
   let orderIdsByEmployee = null;
 
   if (employeeId) {
-    const changedByKey = await resolveEmployeeToIdForLogs(employeeId);
-    if (String(employeeId).trim().includes("@") && !changedByKey) {
+    const scoped = await resolveEmployeeScopedOrderIds({
+      employeeId,
+      from,
+      to,
+      ignoreEmployeeLogDateRange,
+    });
+    if (scoped.notFound) {
       return { rows: [], truncated: false };
     }
 
-    const keyForLogs = changedByKey || String(employeeId).trim();
-
-    const fromLogs = await fetchDistinctOrderIdsFromLogs({
-      changedByKey: keyForLogs,
-      from,
-      to,
-      ignoreDateRange: ignoreEmployeeLogDateRange,
-    });
-    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
-      employeeKey: keyForLogs,
-      employeeRawInput: String(employeeId).trim(),
-    });
-    orderIdsByEmployee = [...new Set([...fromLogs, ...fromRawMarkers])];
+    orderIdsByEmployee = scoped.orderIds;
 
     if (!orderIdsByEmployee.length) {
       return { rows: [], truncated: false };
@@ -2159,14 +2389,23 @@ async function getOrdersStatsTimeSeries({
     : (f, t, g) => listTrendBucketKeys(f, t, g);
 
   let orderIds = null;
-  let filterOrdersByCreatedAtInRange = true;
+  let employeeScope = null;
+  const filterOrdersByCreatedAtInRange =
+    shouldFilterOrdersByCreatedAtWithEmployee({
+      from,
+      to,
+      employeeId,
+      ignoreEmployeeLogDateRange,
+    });
 
-  const employeeKey =
-    typeof employeeId === "string" ? employeeId.trim() : employeeId;
-
-  if (employeeKey) {
-    const changedByKey = await resolveEmployeeToIdForLogs(employeeKey);
-    if (String(employeeKey).includes("@") && !changedByKey) {
+  if (employeeId) {
+    const scoped = await resolveEmployeeScopedOrderIds({
+      employeeId,
+      from,
+      to,
+      ignoreEmployeeLogDateRange,
+    });
+    if (scoped.notFound) {
       return {
         from: from.toISOString(),
         to: to.toISOString(),
@@ -2180,19 +2419,13 @@ async function getOrdersStatsTimeSeries({
       };
     }
 
-    const keyForLogs = changedByKey || String(employeeKey);
-    const fromLogs = await fetchDistinctOrderIdsFromLogs({
-      changedByKey: keyForLogs,
-      from,
-      to,
-      ignoreDateRange: ignoreEmployeeLogDateRange,
-    });
-    const fromRawMarkers = await fetchOrderIdsFromRawDataEmployeeMarkers({
-      employeeKey: keyForLogs,
-      employeeRawInput: String(employeeKey).trim(),
-    });
-    orderIds = [...new Set([...fromLogs, ...fromRawMarkers])];
-    filterOrdersByCreatedAtInRange = false;
+    orderIds = scoped.orderIds;
+    employeeScope = {
+      logOrderIds: scoped.logOrderIds,
+      employeeKey: scoped.employeeKey,
+      employeeEmail: scoped.employeeEmail,
+    };
+    orderIds = await filterOrderIdsForEmployeeScope(orderIds, employeeScope);
 
     if (!orderIds.length) {
       return {
@@ -2272,7 +2505,9 @@ async function getOrdersStatsTimeSeries({
         break;
       }
 
-      let q = supabase.from(ORDERS_TABLE).select("created_at,raw_data");
+      let q = supabase
+        .from(ORDERS_TABLE)
+        .select("order_id,created_at,raw_data,status");
       const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
       if (scoped.skip) break;
       q = scoped.nextQ;
@@ -2288,7 +2523,13 @@ async function getOrdersStatsTimeSeries({
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
       if (listStatusFilterNorm != null) {
-        q = q.eq("status", listStatusFilterNorm);
+        const statuses =
+          listStatusFilterNorm === "pending"
+            ? ["new", "pending"]
+            : [listStatusFilterNorm];
+        q = q.in("status", statuses);
+      } else {
+        q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
       }
 
       const remaining = MAX_TREND_ROWS - rowCount;
@@ -2300,6 +2541,9 @@ async function getOrdersStatsTimeSeries({
       if (!data || data.length === 0) break;
 
       for (const row of data) {
+        if (!orderRowCountsForEmployeeScope(row, employeeScope)) {
+          continue;
+        }
         rowCount += 1;
         const key = bucketKeyForDate(row.created_at, gran);
         if (!key) continue;
