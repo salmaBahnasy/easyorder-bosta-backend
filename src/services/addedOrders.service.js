@@ -1,4 +1,9 @@
 const supabase = require("../config/supabase");
+const {
+  readOrderReferenceFromRow,
+  shouldAssignOrderReference,
+  allocateNextOrderReference,
+} = require("../utils/orderReference");
 
 const ADDED_ORDERS_TABLE =
   process.env.SUPABASE_ADDED_ORDERS_TABLE || "added_orders";
@@ -172,9 +177,18 @@ function formatAddedOrderView(row, employeeById) {
   const employeeId = pickString(row?.added_by_employee_id);
   const employee = employeeId ? employeeById.get(employeeId) : null;
   const products = normalizeProductsArray(row?.products);
+  const orderRef = readOrderReferenceFromRow(row);
 
   return {
     id: row.id,
+    ...(orderRef != null
+      ? {
+          orderReference: orderRef,
+          order_reference: orderRef,
+          orderRef: String(orderRef),
+          order_ref: String(orderRef),
+        }
+      : {}),
     addedBy: {
       id: employeeId || null,
       name: employee?.name ?? row.added_by_name ?? null,
@@ -270,7 +284,13 @@ async function createAddedOrder({ customerName, phone, products, totalCost, acto
     addedByEmail = String(employeeRow.email).trim();
   }
 
-  const payload = {
+  const createdAt = new Date();
+  let orderReference = null;
+  if (shouldAssignOrderReference(createdAt)) {
+    orderReference = await allocateNextOrderReference();
+  }
+
+  const basePayload = {
     added_by_employee_id: employeeId,
     added_by_name: addedByName,
     added_by_email: addedByEmail,
@@ -279,20 +299,42 @@ async function createAddedOrder({ customerName, phone, products, totalCost, acto
     products: normalizedProducts,
     products_names: buildProductsNames(normalizedProducts),
     total_cost: finalTotal,
+    created_at: createdAt.toISOString(),
   };
 
-  const { data, error } = await supabase
-    .from(ADDED_ORDERS_TABLE)
-    .insert(payload)
-    .select("*")
-    .single();
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const payload =
+      orderReference != null
+        ? { ...basePayload, order_reference: orderReference }
+        : basePayload;
 
-  if (error) {
+    const { data, error } = await supabase
+      .from(ADDED_ORDERS_TABLE)
+      .insert(payload)
+      .select("*")
+      .single();
+
+    if (!error) {
+      const employeeById = await fetchEmployeesByIds([employeeId]);
+      return formatAddedOrderView(data, employeeById);
+    }
+
+    const dup =
+      String(error.message || "").includes("duplicate") ||
+      String(error.code || "") === "23505";
+    if (dup && orderReference != null && attempt < 2) {
+      orderReference = await allocateNextOrderReference();
+      lastError = error;
+      continue;
+    }
+
     throw enrichAddedOrdersDbError(error);
   }
 
-  const employeeById = await fetchEmployeesByIds([employeeId]);
-  return formatAddedOrderView(data, employeeById);
+  if (lastError) {
+    throw enrichAddedOrdersDbError(lastError);
+  }
 }
 
 function applyAddedOrdersBaseFilters(query, { resolvedEmployeeId, from, to }) {

@@ -1,4 +1,10 @@
+const supabase = require("../config/supabase");
 const { egyptLocalToUtc } = require("./dateRange");
+
+const ORDERS_TABLE = process.env.SUPABASE_ORDERS_TABLE || "orders";
+const ADDED_ORDERS_TABLE =
+  process.env.SUPABASE_ADDED_ORDERS_TABLE || "added_orders";
+const REF_SCAN_PAGE_SIZE = 1000;
 
 /** أول رقم معرف طلب */
 const ORDER_REFERENCE_START = Number(
@@ -64,6 +70,99 @@ function applyOrderReferenceToRawData(raw_data, reference) {
   };
 }
 
+async function tableHasOrderReferenceColumn(tableName) {
+  const { error } = await supabase
+    .from(tableName)
+    .select("order_reference")
+    .limit(1);
+  return !error;
+}
+
+async function maxOrderReferenceFromTableColumn(tableName) {
+  if (!(await tableHasOrderReferenceColumn(tableName))) {
+    return null;
+  }
+
+  const { data, error } = await supabase
+    .from(tableName)
+    .select("order_reference")
+    .gte("created_at", ORDER_REFERENCE_EGYPT_START.toISOString())
+    .not("order_reference", "is", null)
+    .order("order_reference", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (data?.order_reference == null) {
+    return null;
+  }
+
+  const n = Number(data.order_reference);
+  return Number.isFinite(n) ? Math.trunc(n) : null;
+}
+
+async function maxOrderReferenceFromOrdersRawDataScan() {
+  if (!(await tableHasOrderReferenceColumn(ORDERS_TABLE))) {
+    return null;
+  }
+
+  let maxRef = null;
+  let offset = 0;
+
+  for (;;) {
+    const { data: rows, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("raw_data, order_reference")
+      .gte("created_at", ORDER_REFERENCE_EGYPT_START.toISOString())
+      .range(offset, offset + REF_SCAN_PAGE_SIZE - 1);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (!rows?.length) {
+      break;
+    }
+
+    for (const row of rows) {
+      const ref = readOrderReferenceFromRow(row);
+      if (ref != null && (maxRef == null || ref > maxRef)) {
+        maxRef = ref;
+      }
+    }
+
+    if (rows.length < REF_SCAN_PAGE_SIZE) {
+      break;
+    }
+    offset += REF_SCAN_PAGE_SIZE;
+  }
+
+  return maxRef;
+}
+
+/**
+ * التالي في التسلسل المشترك: orders + added_orders (من 1001، 24/5 مصر فصاعداً).
+ */
+async function allocateNextOrderReference() {
+  let maxRef = ORDER_REFERENCE_START - 1;
+
+  for (const tableName of [ORDERS_TABLE, ADDED_ORDERS_TABLE]) {
+    const fromCol = await maxOrderReferenceFromTableColumn(tableName);
+    if (fromCol != null) {
+      maxRef = Math.max(maxRef, fromCol);
+    }
+  }
+
+  const fromOrdersRaw = await maxOrderReferenceFromOrdersRawDataScan();
+  if (fromOrdersRaw != null) {
+    maxRef = Math.max(maxRef, fromOrdersRaw);
+  }
+
+  return Math.max(maxRef + 1, ORDER_REFERENCE_START);
+}
+
 module.exports = {
   ORDER_REFERENCE_START,
   ORDER_REFERENCE_EGYPT_START,
@@ -71,4 +170,5 @@ module.exports = {
   readOrderReferenceFromRow,
   shouldAssignOrderReference,
   applyOrderReferenceToRawData,
+  allocateNextOrderReference,
 };

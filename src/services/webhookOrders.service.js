@@ -11,6 +11,7 @@ const {
   readOrderReferenceFromRow,
   shouldAssignOrderReference,
   applyOrderReferenceToRawData,
+  allocateNextOrderReference,
 } = require("../utils/orderReference");
 
 const ALLOWED_ORDER_STATUSES = [
@@ -660,56 +661,6 @@ async function fetchOrderRowBySourceId(orderId) {
     throw new Error(error.message);
   }
   return data;
-}
-
-/** التالي في التسلسل: 1001+ للطلبات من 24/5 مصر فصاعداً */
-async function allocateNextOrderReference() {
-  if (await hasOrderReferenceColumn()) {
-    const { data, error } = await supabase
-      .from(ORDERS_TABLE)
-      .select("order_reference")
-      .gte("created_at", ORDER_REFERENCE_EGYPT_START.toISOString())
-      .not("order_reference", "is", null)
-      .order("order_reference", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (!error && data?.order_reference != null) {
-      const n = Number(data.order_reference);
-      if (Number.isFinite(n)) {
-        return Math.max(Math.trunc(n) + 1, ORDER_REFERENCE_START);
-      }
-    }
-  }
-
-  let maxRef = ORDER_REFERENCE_START - 1;
-  let offset = 0;
-  for (;;) {
-    const useRefCol = await hasOrderReferenceColumn();
-    const { data: rows, error: scanErr } = await supabase
-      .from(ORDERS_TABLE)
-      .select(useRefCol ? "raw_data, order_reference" : "raw_data")
-      .gte("created_at", ORDER_REFERENCE_EGYPT_START.toISOString())
-      .range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
-    if (scanErr) {
-      throw new Error(scanErr.message);
-    }
-    if (!rows?.length) {
-      break;
-    }
-    for (const row of rows) {
-      const ref = readOrderReferenceFromRow(row);
-      if (ref != null && ref > maxRef) {
-        maxRef = ref;
-      }
-    }
-    if (rows.length < LOG_SELECT_PAGE_SIZE) {
-      break;
-    }
-    offset += LOG_SELECT_PAGE_SIZE;
-  }
-
-  return Math.max(maxRef + 1, ORDER_REFERENCE_START);
 }
 
 function mapStoredOrderToClient(row) {
