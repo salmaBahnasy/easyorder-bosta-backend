@@ -259,6 +259,32 @@ function resolveOrderMeta(payload, options = {}) {
   return { order_source, order_type, shipping_status };
 }
 
+/** حالة orders.status عند الإنشاء — الطلب الجديد فقط؛ إعادة upsert تحافظ على الحالة المخزنة. */
+function resolveInitialOrderStatus(order, existingRow, options = {}) {
+  const fromWebhook = Boolean(options.fromWebhook);
+
+  if (existingRow?.status) {
+    return existingRow.status;
+  }
+
+  const requested = pickMetaField(order, "status", "orderStatus");
+  if (requested == null || normalizeMetaString(requested) === "") {
+    return "new";
+  }
+
+  const status = normalizeMetaString(requested);
+  if (!ALLOWED_ORDER_STATUSES.includes(status)) {
+    if (fromWebhook) {
+      return "new";
+    }
+    const err = new Error("Invalid status value");
+    err.code = "INVALID_STATUS";
+    throw err;
+  }
+
+  return status;
+}
+
 const ORDERS_TABLE = process.env.SUPABASE_ORDERS_TABLE || "orders";
 const ORDER_STATUS_LOGS_TABLE =
   process.env.SUPABASE_ORDER_STATUS_LOGS_TABLE || "order_status_logs";
@@ -668,6 +694,7 @@ function mapStoredOrderToClient(row) {
   return {
     ...(row.raw_data || {}),
     sourceOrderId: row.order_id,
+    status: row.status,
     orderStatus: row.status,
     receivedAt: row.created_at,
     ...(ref != null
@@ -776,9 +803,15 @@ async function addWebhookOrder(order, options = {}) {
     Object.assign(raw_data, applyOrderReferenceToRawData({}, orderReference));
   }
 
+  const nextStatus = resolveInitialOrderStatus(order, existingRow, {
+    fromWebhook,
+  });
+  raw_data.status = nextStatus;
+  raw_data.orderStatus = nextStatus;
+
   const payload = {
     order_id: sourceOrderId,
-    status: existingRow?.status || "new",
+    status: nextStatus,
     raw_data,
     created_at: createdAt.toISOString(),
   };
