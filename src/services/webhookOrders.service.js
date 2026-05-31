@@ -105,6 +105,56 @@ function normalizeMetaString(value) {
   return String(value).trim();
 }
 
+/** حالة الطلب من الجسم — orderStatus أولاً (الواجهة) ثم order_status ثم status. */
+function pickOrderStatusField(payload) {
+  if (!payload || typeof payload !== "object") return undefined;
+  for (const key of ["orderStatus", "order_status", "status"]) {
+    if (!Object.prototype.hasOwnProperty.call(payload, key)) continue;
+    const value = normalizeMetaString(payload[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/** توحيد كتابة الحالة (حساسية الأحرف / مرادفات شائعة). */
+function normalizeOrderStatusInput(value) {
+  const raw = normalizeMetaString(value);
+  if (!raw) return "";
+
+  if (ALLOWED_ORDER_STATUSES.includes(raw)) return raw;
+
+  const lower = raw.toLowerCase();
+  const aliases = {
+    confirmed: "Confirmed",
+    shipped: "Shipped",
+    canceled: "canceled",
+    cancelled: "canceled",
+    new: "new",
+    no_replay: "no_replay",
+    noreply: "no_replay",
+    "no reply": "no_replay",
+    repeater: "repeater",
+    "follow up": "follow up",
+    followup: "follow up",
+  };
+  if (aliases[lower]) return aliases[lower];
+
+  const arabic = {
+    مؤكد: "Confirmed",
+    "تم التأكيد": "Confirmed",
+    "تم التاكيد": "Confirmed",
+    "تم الشحن": "Shipped",
+    جديد: "new",
+    ملغي: "canceled",
+    "لا رد": "no_replay",
+    متابعة: "follow up",
+    مكرر: "repeater",
+  };
+  if (arabic[raw]) return arabic[raw];
+
+  return raw;
+}
+
 /** يزيل أحرف تكسر LIKE أو ilike(all) في PostgREST */
 function sanitizeIlikeNeedle(value) {
   const s = String(value).trim().slice(0, 200);
@@ -259,30 +309,38 @@ function resolveOrderMeta(payload, options = {}) {
   return { order_source, order_type, shipping_status };
 }
 
-/** حالة orders.status عند الإنشاء — الطلب الجديد فقط؛ إعادة upsert تحافظ على الحالة المخزنة. */
+/** حالة orders.status عند الإنشاء — إنشاء يدوي + status مُرسل يتجاوز الحالة المخزنة. */
 function resolveInitialOrderStatus(order, existingRow, options = {}) {
   const fromWebhook = Boolean(options.fromWebhook);
+  const requestedRaw = pickOrderStatusField(order);
+  const hasRequestedStatus = requestedRaw !== undefined && requestedRaw !== "";
+
+  if (hasRequestedStatus) {
+    const status = normalizeOrderStatusInput(requestedRaw);
+    if (!ALLOWED_ORDER_STATUSES.includes(status)) {
+      if (fromWebhook) {
+        return existingRow?.status || "new";
+      }
+      const err = new Error("Invalid status value");
+      err.code = "INVALID_STATUS";
+      throw err;
+    }
+    // إنشاء يدوي: احترم الحالة المُرسلة حتى لو الطلب موجود مسبقاً (upsert).
+    if (!fromWebhook) {
+      return status;
+    }
+    // ويب هوك: طلب جديد فقط — وإلا احتفظ بالحالة المخزنة.
+    if (!existingRow?.status) {
+      return status;
+    }
+    return existingRow.status;
+  }
 
   if (existingRow?.status) {
     return existingRow.status;
   }
 
-  const requested = pickMetaField(order, "status", "orderStatus");
-  if (requested == null || normalizeMetaString(requested) === "") {
-    return "new";
-  }
-
-  const status = normalizeMetaString(requested);
-  if (!ALLOWED_ORDER_STATUSES.includes(status)) {
-    if (fromWebhook) {
-      return "new";
-    }
-    const err = new Error("Invalid status value");
-    err.code = "INVALID_STATUS";
-    throw err;
-  }
-
-  return status;
+  return "new";
 }
 
 const ORDERS_TABLE = process.env.SUPABASE_ORDERS_TABLE || "orders";
@@ -1227,8 +1285,28 @@ async function editOrder(orderId, updates, actor) {
 
   let nextStatus = existingOrder.status;
   let shouldLogStatusChange = false;
-  if (Object.prototype.hasOwnProperty.call(normalizedUpdates, "status")) {
-    if (!ALLOWED_ORDER_STATUSES.includes(normalizedUpdates.status)) {
+
+  const normalizedIncomingUpdates = { ...normalizedUpdates };
+
+  if (
+    Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "orderStatus")
+  ) {
+    normalizedIncomingUpdates.status = normalizedIncomingUpdates.orderStatus;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "order_status",
+    )
+  ) {
+    normalizedIncomingUpdates.status = normalizedIncomingUpdates.order_status;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, "status")) {
+    const normalizedStatus = normalizeOrderStatusInput(
+      normalizedIncomingUpdates.status,
+    );
+    if (!ALLOWED_ORDER_STATUSES.includes(normalizedStatus)) {
       const invalidStatusError = new Error("Invalid status value");
       invalidStatusError.code = "INVALID_STATUS";
       throw invalidStatusError;
@@ -1238,11 +1316,11 @@ async function editOrder(orderId, updates, actor) {
       authError.code = "UNAUTHORIZED";
       throw authError;
     }
-    nextStatus = normalizedUpdates.status;
+    normalizedIncomingUpdates.status = normalizedStatus;
+    normalizedIncomingUpdates.orderStatus = normalizedStatus;
+    nextStatus = normalizedStatus;
     shouldLogStatusChange = nextStatus !== existingOrder.status;
   }
-
-  const normalizedIncomingUpdates = { ...normalizedUpdates };
 
   // Keep common aliases in sync so list/detail pages read same values.
   if (

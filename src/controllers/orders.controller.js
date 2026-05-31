@@ -411,13 +411,14 @@ async function createOrder(req, res) {
         url: postOrdersAbsoluteUrl(req),
         headers: { "Content-Type": "application/json" },
         notes: {
-          ar: "إنشاء يدوي: افتراضيًا مصدر الطلب متجر (store)، النوع جديد (new)، الشحن قيد التنفيذ (in_progress)، وحالة الطلب new. يمكن تجاوزها بإرسال order_source / order_type / shipping_status / status. من الويب هوك: POST /webhooks/easyorders/order-created يضبط المصدر متجرًا. إرسال Authorization: Bearer يملأ created_by_employee_id و user_email في raw_data.",
+          ar: "إنشاء يدوي: افتراضيًا مصدر الطلب متجر (store)، النوع جديد (new)، الشحن قيد التنفيذ (in_progress)، وحالة الطلب new. يمكن تجاوزها بإرسال order_source / order_type / shipping_status / status أو orderStatus (يُفضَّل orderStatus من الواجهة). من الويب هوك: POST /webhooks/easyorders/order-created يضبط المصدر متجرًا. إرسال Authorization: Bearer يملأ created_by_employee_id و user_email في raw_data.",
           manualRequiredFields: [],
           manualOptionalMeta: [
             "order_source",
             "order_type",
             "shipping_status",
             "status",
+            "orderStatus",
           ],
           allowedOrderSources: ORDER_SOURCES,
           allowedOrderTypes: ORDER_TYPES,
