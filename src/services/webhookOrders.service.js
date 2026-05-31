@@ -53,6 +53,71 @@ const SHIPPING_STATUS_OPTIONS = [
 
 const SHIPPING_STATUSES = SHIPPING_STATUS_OPTIONS.map((o) => o.value);
 
+/** delivered أعلى أولوية عند تعارض shipping_status / shippingStatus */
+const SHIPPING_STATUS_RANK = {
+  in_progress: 1,
+  failed: 2,
+  delivered: 3,
+};
+
+function normalizeShippingStatusInput(value) {
+  const raw = normalizeMetaString(value);
+  if (!raw) return "";
+  if (SHIPPING_STATUSES.includes(raw)) return raw;
+
+  const lower = raw.toLowerCase();
+  const aliases = {
+    delivered: "delivered",
+    success: "delivered",
+    successful: "delivered",
+    failed: "failed",
+    in_progress: "in_progress",
+    inprogress: "in_progress",
+  };
+  if (aliases[lower]) return aliases[lower];
+
+  const arabic = {
+    "تم التوصيل": "delivered",
+    "تم التسليم": "delivered",
+    "فشل التوصيل": "failed",
+    "قيد التنفيذ": "in_progress",
+  };
+  if (arabic[raw]) return arabic[raw];
+
+  return raw;
+}
+
+/** حالة الشحن الفعلية — عند التعارض نفضّل delivered ثم failed ثم in_progress */
+function resolveEffectiveShippingStatus(raw) {
+  if (!raw || typeof raw !== "object") return "";
+  const snake = normalizeShippingStatusInput(raw.shipping_status);
+  const camel = normalizeShippingStatusInput(raw.shippingStatus);
+  if (!snake && !camel) return "";
+  if (!snake) return camel;
+  if (!camel) return snake;
+  if (snake === camel) return snake;
+  const rank = (s) => SHIPPING_STATUS_RANK[s] || 0;
+  return rank(snake) >= rank(camel) ? snake : camel;
+}
+
+/** طلب ناجح = أي من shipping_status أو shippingStatus = delivered */
+function isDeliveredShipping(raw) {
+  if (!raw || typeof raw !== "object") return false;
+  const snake = normalizeShippingStatusInput(raw.shipping_status);
+  const camel = normalizeShippingStatusInput(raw.shippingStatus);
+  return snake === "delivered" || camel === "delivered";
+}
+
+function syncShippingStatusAliases(rawData) {
+  if (!rawData || typeof rawData !== "object") return rawData;
+  const effective = resolveEffectiveShippingStatus(rawData);
+  if (effective) {
+    rawData.shipping_status = effective;
+    rawData.shippingStatus = effective;
+  }
+  return rawData;
+}
+
 const ORDER_STATUS_OPTIONS = [
   { value: "new", labelAr: "جديد" },
   { value: "Confirmed", labelAr: "مؤكد" },
@@ -749,8 +814,13 @@ async function fetchOrderRowBySourceId(orderId) {
 
 function mapStoredOrderToClient(row) {
   const ref = readOrderReferenceFromRow(row);
+  const raw =
+    row.raw_data && typeof row.raw_data === "object" && !Array.isArray(row.raw_data)
+      ? { ...row.raw_data }
+      : {};
+  syncShippingStatusAliases(raw);
   return {
-    ...(row.raw_data || {}),
+    ...raw,
     sourceOrderId: row.order_id,
     status: row.status,
     orderStatus: row.status,
@@ -832,7 +902,7 @@ async function addWebhookOrder(order, options = {}) {
 
   raw_data.orderSource = raw_data.order_source;
   raw_data.orderType = raw_data.order_type;
-  raw_data.shippingStatus = raw_data.shipping_status;
+  syncShippingStatusAliases(raw_data);
 
   if (actor?.id != null) {
     const idStr = String(actor.id).trim();
@@ -1366,6 +1436,15 @@ async function editOrder(orderId, updates, actor) {
     normalizedIncomingUpdates.shipping_status =
       normalizedIncomingUpdates.shippingStatus;
   }
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "shipping_status",
+    )
+  ) {
+    normalizedIncomingUpdates.shippingStatus =
+      normalizedIncomingUpdates.shipping_status;
+  }
 
   if (
     Object.prototype.hasOwnProperty.call(
@@ -1414,6 +1493,7 @@ async function editOrder(orderId, updates, actor) {
     ...(existingOrder.raw_data || {}),
     ...normalizedIncomingUpdates,
   };
+  syncShippingStatusAliases(mergedRawData);
 
   if (changedBy) {
     mergedRawData.updated_by_employee_id = changedBy;
@@ -2247,10 +2327,7 @@ function aggregateOrdersAnalyticsRows(rows, options = {}) {
       raw.orderSource,
     );
     const orderType = analyticsFirstNonEmpty(raw.order_type, raw.orderType);
-    const shippingStatus = analyticsFirstNonEmpty(
-      raw.shipping_status,
-      raw.shippingStatus,
-    );
+    const shippingStatus = resolveEffectiveShippingStatus(raw);
     const orderStatus =
       row.status != null && String(row.status).trim() !== ""
         ? String(row.status).trim()
@@ -3030,11 +3107,7 @@ async function getOrderCostMetrics({ expense, from, to }) {
       shippedOrders += 1;
       shippedSales += sales;
 
-      const shippingStatus = analyticsFirstNonEmpty(
-        raw.shipping_status,
-        raw.shippingStatus,
-      );
-      if (shippingStatus === SUCCESSFUL_SHIPPING_STATUS) {
+      if (isDeliveredShipping(raw)) {
         successfulOrders += 1;
         successfulSales += sales;
       }
