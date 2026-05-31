@@ -2948,6 +2948,128 @@ async function getProductSalesChart({
   };
 }
 
+const MAX_ORDER_COST_ROWS = 50000;
+const SUCCESSFUL_SHIPPING_STATUS = "delivered";
+
+function roundMoney(value) {
+  if (value == null || !Number.isFinite(value)) return null;
+  return Math.round(value * 100) / 100;
+}
+
+function buildOrderCostBucket(expenseAmount, totalOrders, totalSales) {
+  const costPerOrder =
+    totalOrders > 0 ? expenseAmount / totalOrders : null;
+  const salesPerOrder = totalOrders > 0 ? totalSales / totalOrders : null;
+  const salesPerExpense =
+    expenseAmount > 0 ? totalSales / expenseAmount : null;
+
+  return {
+    totalOrders,
+    totalSales: roundMoney(totalSales),
+    salesPerOrder: roundMoney(salesPerOrder),
+    costPerOrder: roundMoney(costPerOrder),
+    salesPerExpense: roundMoney(salesPerExpense),
+  };
+}
+
+/**
+ * تكلفة اكتساب الطلب: المصروفات ÷ عدد الطلبات (مشحون / مشحون+توصيل ناجح).
+ * shipped = orders.status Shipped
+ * successful = Shipped + raw_data shipping_status delivered
+ */
+async function getOrderCostMetrics({ expense, from, to }) {
+  const expenseAmount = Number(expense);
+  if (!Number.isFinite(expenseAmount) || expenseAmount < 0) {
+    const err = new Error("expense must be a non-negative number");
+    err.code = "INVALID_EXPENSE";
+    throw err;
+  }
+
+  let shippedOrders = 0;
+  let shippedSales = 0;
+  let successfulOrders = 0;
+  let successfulSales = 0;
+  let offset = 0;
+  let truncated = false;
+
+  for (;;) {
+    if (shippedOrders >= MAX_ORDER_COST_ROWS) {
+      truncated = true;
+      break;
+    }
+
+    let q = supabase
+      .from(ORDERS_TABLE)
+      .select("order_id,raw_data,status")
+      .eq("status", "Shipped");
+
+    if (from) {
+      q = q.gte("created_at", from.toISOString());
+    }
+    if (to) {
+      q = q.lte("created_at", to.toISOString());
+    }
+
+    const remaining = MAX_ORDER_COST_ROWS - shippedOrders;
+    const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+    q = q.range(offset, offset + pageSize - 1);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      const raw =
+        row.raw_data &&
+        typeof row.raw_data === "object" &&
+        !Array.isArray(row.raw_data)
+          ? row.raw_data
+          : {};
+      const sales = pickOrderTotalCost(raw);
+
+      shippedOrders += 1;
+      shippedSales += sales;
+
+      const shippingStatus = analyticsFirstNonEmpty(
+        raw.shipping_status,
+        raw.shippingStatus,
+      );
+      if (shippingStatus === SUCCESSFUL_SHIPPING_STATUS) {
+        successfulOrders += 1;
+        successfulSales += sales;
+      }
+    }
+
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return {
+    expense: roundMoney(expenseAmount),
+    from: from.toISOString(),
+    to: to.toISOString(),
+    shipped: {
+      labelAr: "تكلفة الطلب المشحون",
+      descriptionAr:
+        "المصروفات ÷ عدد الطلبات التي حالتها تم الشحن (Shipped)",
+      ...buildOrderCostBucket(expenseAmount, shippedOrders, shippedSales),
+    },
+    successful: {
+      labelAr: "تكلفة الطلب الناجح",
+      descriptionAr:
+        "المصروفات ÷ عدد الطلبات التي حالتها تم الشحن وحالة الشحن تم التوصيل (delivered)",
+      ...buildOrderCostBucket(
+        expenseAmount,
+        successfulOrders,
+        successfulSales,
+      ),
+    },
+    successfulShippingStatus: SUCCESSFUL_SHIPPING_STATUS,
+    truncated,
+    maxRowsCap: MAX_ORDER_COST_ROWS,
+  };
+}
+
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
@@ -2957,6 +3079,7 @@ module.exports = {
   getOrdersStatistics,
   getOrdersStatsTimeSeries,
   getProductSalesChart,
+  getOrderCostMetrics,
   getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,

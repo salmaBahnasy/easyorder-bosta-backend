@@ -9,6 +9,7 @@ const {
   getOrdersStatsTimeSeries,
   getOrdersAnalyticsReport,
   getProductSalesChart,
+  getOrderCostMetrics,
   getWebhookOrderByReference,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
@@ -19,6 +20,7 @@ const {
 const { toPresentation } = require("../services/easyorderPresentation.service");
 const {
   resolveEasyOrderDateRange,
+  getEgyptDayRange,
   isEasyOrderApiRequest,
 } = require("../utils/dateRange");
 
@@ -162,6 +164,27 @@ function resolveOrdersTrendDateRange(req) {
   }
 
   return { from, to };
+}
+
+function resolveOrderCostsDateRange(req) {
+  const dateParam = optionalQueryParam(req.query.date);
+  if (dateParam) {
+    if (isEasyOrderApiRequest(req)) {
+      return getEgyptDayRange(dateParam);
+    }
+    const d = new Date(dateParam);
+    if (Number.isNaN(d.getTime())) {
+      const err = new Error('date must be "YYYY-MM-DD" or a valid ISO date');
+      err.code = "INVALID_DATE";
+      throw err;
+    }
+    const from = new Date(d);
+    from.setHours(0, 0, 0, 0);
+    const to = new Date(d);
+    to.setHours(23, 59, 59, 999);
+    return { from, to };
+  }
+  return resolveOrdersTrendDateRange(req);
 }
 
 async function getOrders(req, res) {
@@ -1114,6 +1137,79 @@ async function getProductSalesChartHandler(req, res) {
   }
 }
 
+/**
+ * GET /api/orders/costs
+ * GET /api/easyorder/costs
+ *
+ * Order acquisition cost from marketing spend (expense) vs shipped orders.
+ * expense (required) + date or from/to (default: current month Egypt on easyorder).
+ */
+async function getOrderCosts(req, res) {
+  try {
+    const expenseRaw =
+      req.query.expense ?? req.query.spent ?? req.query.spend;
+    if (expenseRaw == null || String(expenseRaw).trim() === "") {
+      res.status(400).json({
+        success: false,
+        message: "expense is required (non-negative number)",
+      });
+      return;
+    }
+
+    const expense = Number(expenseRaw);
+    if (!Number.isFinite(expense) || expense < 0) {
+      res.status(400).json({
+        success: false,
+        message: "expense must be a non-negative number",
+      });
+      return;
+    }
+
+    let from;
+    let to;
+    try {
+      ({ from, to } = resolveOrderCostsDateRange(req));
+    } catch (error) {
+      if (
+        error.code === "INVALID_FROM" ||
+        error.code === "INVALID_TO" ||
+        error.code === "INVALID_DATE"
+      ) {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      throw error;
+    }
+
+    const metrics = await getOrderCostMetrics({ expense, from, to });
+
+    res.json({
+      success: true,
+      filters: {
+        expense,
+        date: optionalQueryParam(req.query.date) || null,
+        from: from.toISOString(),
+        to: to.toISOString(),
+      },
+      metrics,
+    });
+  } catch (error) {
+    if (error.code === "INVALID_EXPENSE") {
+      res.status(400).json({
+        success: false,
+        message: error.message,
+      });
+      return;
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to compute order costs",
+      error: error.message,
+    });
+  }
+}
+
 module.exports = {
   createOrder,
   updateOrder,
@@ -1126,4 +1222,5 @@ module.exports = {
   getOrdersStatsTrend,
   getOrdersAnalytics,
   getProductSalesChartHandler,
+  getOrderCosts,
 };

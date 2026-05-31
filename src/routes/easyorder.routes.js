@@ -5,6 +5,7 @@ const {
   getOrdersStats,
   getOrdersAnalytics,
   getProductSalesChartHandler,
+  getOrderCosts,
 } = require("../controllers/orders.controller");
 const ordersRoutes = require("./orders.routes");
 const employeesRoutes = require("./employees.routes");
@@ -25,6 +26,7 @@ router.post("/auth/login", login);
 router.get("/stats", getOrdersStats);
 router.get("/analytics", getOrdersAnalytics);
 router.get("/charts/product-sales", getProductSalesChartHandler);
+router.get("/costs", getOrderCosts);
 
 router.use("/orders", ordersRoutes);
 router.use("/employees", employeesRoutes);
