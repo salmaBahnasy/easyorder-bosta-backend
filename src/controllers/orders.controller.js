@@ -8,6 +8,7 @@ const {
   getOrdersStatistics,
   getOrdersStatsTimeSeries,
   getOrdersAnalyticsReport,
+  getProductSalesChart,
   getWebhookOrderByReference,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
@@ -1051,6 +1052,67 @@ async function getOrdersAnalytics(req, res) {
   }
 }
 
+/**
+ * GET /api/orders/charts/product-sales
+ * GET /api/easyorder/charts/product-sales
+ *
+ * Sales chart data per product (orders / units / revenue per day|week|month).
+ * Default: all products, current calendar month (Egypt TZ on /api/easyorder/*).
+ * Optional product_id (or easyorder_id) narrows to one product for the graph.
+ */
+async function getProductSalesChartHandler(req, res) {
+  try {
+    const easyorder_id = optionalQueryParam(
+      req.query.easyorder_id || req.query.easyorderId,
+    );
+    const product_id =
+      optionalQueryParam(req.query.product_id || req.query.productId) ||
+      easyorder_id;
+
+    const granRaw = optionalQueryParam(req.query.granularity);
+    const granularity =
+      granRaw === "week" || granRaw === "month" ? granRaw : "day";
+
+    let from;
+    let to;
+    try {
+      ({ from, to } = resolveOrdersTrendDateRange(req));
+    } catch (error) {
+      if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      throw error;
+    }
+
+    const chart = await getProductSalesChart({
+      from,
+      to,
+      granularity,
+      product_id,
+      useEgyptBuckets: isEasyOrderApiRequest(req),
+    });
+
+    res.json({
+      success: true,
+      filters: {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity,
+        product_id: product_id || null,
+        easyorder_id: easyorder_id || null,
+      },
+      chart,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to build product sales chart",
+      error: error.message,
+    });
+  }
+}
+
 module.exports = {
   createOrder,
   updateOrder,
@@ -1062,4 +1124,5 @@ module.exports = {
   getOrdersStats,
   getOrdersStatsTrend,
   getOrdersAnalytics,
+  getProductSalesChartHandler,
 };

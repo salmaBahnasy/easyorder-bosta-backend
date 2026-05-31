@@ -2043,6 +2043,89 @@ function sumLineQuantitiesFromRaw(raw, options = {}) {
   }, 0);
 }
 
+function resolveLineProductId(line) {
+  if (!line || typeof line !== "object") return null;
+  const product =
+    line.product && typeof line.product === "object" ? line.product : {};
+  const candidates = [
+    line.product_id,
+    line.productId,
+    line.easyorder_id,
+    line.easyorderId,
+    product.id,
+    product.product_id,
+    product.productId,
+    product.easyorder_id,
+    product.easyorderId,
+  ];
+  for (const candidate of candidates) {
+    if (candidate == null) continue;
+    const value = String(candidate).trim();
+    if (value) return value;
+  }
+  const sku = analyticsFirstNonEmpty(
+    product.sku,
+    line.sku,
+    line.variant?.sku,
+  );
+  if (sku) return `sku:${sku}`;
+  return null;
+}
+
+function resolveLineProductLabel(line) {
+  if (!line || typeof line !== "object") {
+    return { name: null, sku: null };
+  }
+  const product =
+    line.product && typeof line.product === "object" ? line.product : {};
+  const variant =
+    line.variant && typeof line.variant === "object" ? line.variant : {};
+  return {
+    name:
+      analyticsFirstNonEmpty(
+        product.name,
+        line.name,
+        line.product_name,
+        product.title,
+        line.title,
+      ) || null,
+    sku:
+      analyticsFirstNonEmpty(
+        product.sku,
+        line.sku,
+        variant.sku,
+        product.code,
+        line.product_sku,
+      ) || null,
+  };
+}
+
+function pickLineUnitPrice(line) {
+  if (!line || typeof line !== "object") return 0;
+  const product =
+    line.product && typeof line.product === "object" ? line.product : {};
+  const variant =
+    line.variant && typeof line.variant === "object" ? line.variant : {};
+  const candidates = [
+    line.price,
+    line.unit_price,
+    line.unitPrice,
+    variant.sale_price,
+    variant.price,
+    product.sale_price,
+    product.price,
+  ];
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return 0;
+}
+
+function pickLineRevenue(line) {
+  return pickLineQuantity(line) * pickLineUnitPrice(line);
+}
+
 /** مبيعات الطلب الواحد — نفس منطق `total` في قائمة الطلبات: total_cost ثم cost */
 function pickOrderTotalCost(raw) {
   if (!raw || typeof raw !== "object") return 0;
@@ -2588,6 +2671,205 @@ async function getOrdersStatsTimeSeries({
   };
 }
 
+const MAX_PRODUCT_SALES_ROWS = 50000;
+const PRODUCTS_TABLE =
+  process.env.SUPABASE_PRODUCTS_TABLE || "products";
+
+function emptyProductSalesBucket() {
+  return {
+    totalOrders: 0,
+    totalUnits: 0,
+    totalRevenue: 0,
+  };
+}
+
+function finalizeProductSalesBucket(bucket) {
+  return {
+    totalOrders: bucket.totalOrders,
+    totalUnits: bucket.totalUnits,
+    totalRevenue: Math.round(bucket.totalRevenue * 100) / 100,
+  };
+}
+
+async function loadProductCatalogMeta(productIds) {
+  const ids = [...new Set(productIds.filter(Boolean))];
+  const map = new Map();
+  if (!ids.length) return map;
+
+  for (const chunk of chunkArray(ids, IN_CHUNK_SIZE)) {
+    const { data, error } = await supabase
+      .from(PRODUCTS_TABLE)
+      .select("easyorder_id,name,sku")
+      .in("easyorder_id", chunk);
+    if (error) continue;
+    for (const row of data || []) {
+      if (row?.easyorder_id == null) continue;
+      map.set(String(row.easyorder_id), {
+        name: row.name ?? null,
+        sku: row.sku ?? null,
+      });
+    }
+  }
+
+  return map;
+}
+
+/**
+ * Sales chart per product: time buckets with orders / units / revenue.
+ * Default (no product_id): all products in range. Optional product_id narrows to one product.
+ */
+async function getProductSalesChart({
+  from,
+  to,
+  granularity = "day",
+  product_id,
+  useEgyptBuckets = false,
+}) {
+  const gran =
+    granularity === "week" || granularity === "month" ? granularity : "day";
+
+  const bucketKeyForDate = useEgyptBuckets
+    ? (date, g) => getEgyptTrendBucketKey(date, g)
+    : (date, g) => bucketKeyFromDate(date, g);
+  const listBucketKeys = useEgyptBuckets
+    ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
+    : (f, t, g) => listTrendBucketKeys(f, t, g);
+
+  const productIdFilter = normalizeProductIdForCartFilter(product_id);
+  const bucketKeys = listBucketKeys(from, to, gran);
+
+  const productMap = new Map();
+  let rowCount = 0;
+  let truncated = false;
+  let offset = 0;
+
+  for (;;) {
+    if (rowCount >= MAX_PRODUCT_SALES_ROWS) {
+      truncated = true;
+      break;
+    }
+
+    let q = supabase
+      .from(ORDERS_TABLE)
+      .select("order_id,created_at,raw_data,status");
+
+    if (from) {
+      q = q.gte("created_at", from.toISOString());
+    }
+    if (to) {
+      q = q.lte("created_at", to.toISOString());
+    }
+    q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
+
+    if (productIdFilter && UUID_LIKE.test(productIdFilter)) {
+      q = applyProductUuidCartContainsOr(q, productIdFilter);
+    } else if (productIdFilter) {
+      q = applyProductCartIlikeFilters(q, {
+        product_id: productIdFilter,
+        product_sku: null,
+      });
+    }
+
+    const remaining = MAX_PRODUCT_SALES_ROWS - rowCount;
+    const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+    q = q.range(offset, offset + pageSize - 1);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      rowCount += 1;
+      const bucketDate = bucketKeyForDate(row.created_at, gran);
+      if (!bucketDate) continue;
+
+      const raw =
+        row.raw_data &&
+        typeof row.raw_data === "object" &&
+        !Array.isArray(row.raw_data)
+          ? row.raw_data
+          : {};
+
+      const seenProductsInOrder = new Set();
+      for (const line of parseCartItemsArray(raw)) {
+        const pid = resolveLineProductId(line);
+        if (!pid) continue;
+        if (productIdFilter && !lineMatchesProductIdFilter(line, productIdFilter)) {
+          continue;
+        }
+
+        if (!productMap.has(pid)) {
+          const label = resolveLineProductLabel(line);
+          productMap.set(pid, {
+            product_id: pid,
+            name: label.name,
+            sku: label.sku,
+            buckets: new Map(),
+            summary: emptyProductSalesBucket(),
+          });
+        }
+
+        const productEntry = productMap.get(pid);
+        const label = resolveLineProductLabel(line);
+        if (!productEntry.name && label.name) productEntry.name = label.name;
+        if (!productEntry.sku && label.sku) productEntry.sku = label.sku;
+
+        if (!productEntry.buckets.has(bucketDate)) {
+          productEntry.buckets.set(bucketDate, emptyProductSalesBucket());
+        }
+
+        const bucket = productEntry.buckets.get(bucketDate);
+        const units = pickLineQuantity(line);
+        const revenue = pickLineRevenue(line);
+
+        bucket.totalUnits += units;
+        bucket.totalRevenue += revenue;
+        productEntry.summary.totalUnits += units;
+        productEntry.summary.totalRevenue += revenue;
+
+        if (!seenProductsInOrder.has(pid)) {
+          seenProductsInOrder.add(pid);
+          bucket.totalOrders += 1;
+          productEntry.summary.totalOrders += 1;
+        }
+      }
+    }
+
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  const catalogMeta = await loadProductCatalogMeta([...productMap.keys()]);
+  const products = [...productMap.values()]
+    .map((entry) => {
+      const catalog = catalogMeta.get(entry.product_id);
+      const name = catalog?.name || entry.name || entry.product_id;
+      const sku = catalog?.sku || entry.sku || null;
+      const points = bucketKeys.map((date) => {
+        const bucket = entry.buckets.get(date) || emptyProductSalesBucket();
+        return { date, ...finalizeProductSalesBucket(bucket) };
+      });
+
+      return {
+        product_id: entry.product_id,
+        name,
+        sku,
+        points,
+        summary: finalizeProductSalesBucket(entry.summary),
+      };
+    })
+    .sort((a, b) => b.summary.totalUnits - a.summary.totalUnits);
+
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    granularity: gran,
+    products,
+    truncated,
+    maxRowsCap: MAX_PRODUCT_SALES_ROWS,
+  };
+}
+
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
@@ -2596,6 +2878,7 @@ module.exports = {
   editOrder,
   getOrdersStatistics,
   getOrdersStatsTimeSeries,
+  getProductSalesChart,
   getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,

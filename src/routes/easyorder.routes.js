@@ -1,7 +1,11 @@
 const express = require("express");
 
 const { login } = require("../controllers/employees.controller");
-const { getOrdersStats, getOrdersAnalytics } = require("../controllers/orders.controller");
+const {
+  getOrdersStats,
+  getOrdersAnalytics,
+  getProductSalesChartHandler,
+} = require("../controllers/orders.controller");
 const ordersRoutes = require("./orders.routes");
 const employeesRoutes = require("./employees.routes");
 const productsRoutes = require("./products.routes");
@@ -20,6 +24,7 @@ router.post("/auth/login", login);
 /** Some clients use /api/easyorder/stats instead of /api/easyorder/orders/stats */
 router.get("/stats", getOrdersStats);
 router.get("/analytics", getOrdersAnalytics);
+router.get("/charts/product-sales", getProductSalesChartHandler);
 
 router.use("/orders", ordersRoutes);
 router.use("/employees", employeesRoutes);
