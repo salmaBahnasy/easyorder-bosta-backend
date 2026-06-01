@@ -117,6 +117,21 @@ function getEgyptDayRange(date) {
   return { from, to };
 }
 
+/** Query value (YYYY-MM-DD or ISO) → that calendar day in Egypt. */
+function resolveSingleDayFromQueryValue(raw) {
+  const s = String(Array.isArray(raw) ? raw[0] : raw).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    return getEgyptDayRange(s);
+  }
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) {
+    const err = new Error('date must be "YYYY-MM-DD" or a valid ISO date');
+    err.code = "INVALID_DATE";
+    throw err;
+  }
+  return getEgyptDayRange(getEgyptCalendarDateKey(d));
+}
+
 function formatYmd(year, month, day) {
   return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
@@ -269,6 +284,7 @@ module.exports = {
   getEgyptMonthToDateRange,
   getEgyptLast30DaysRange,
   getEgyptDayRange,
+  resolveSingleDayFromQueryValue,
   getEgyptCalendarDateKey,
   getEgyptTrendBucketKey,
   listEgyptTrendBucketKeys,

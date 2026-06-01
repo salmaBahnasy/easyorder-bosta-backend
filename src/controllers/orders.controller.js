@@ -21,8 +21,10 @@ const { toPresentation } = require("../services/easyorderPresentation.service");
 const {
   resolveEasyOrderDateRange,
   getEgyptDayRange,
+  getEgyptCalendarDateKey,
   getEgyptLast30DaysRange,
   isEasyOrderApiRequest,
+  resolveSingleDayFromQueryValue,
 } = require("../utils/dateRange");
 const {
   saveOrderCostDailyEntry,
@@ -220,6 +222,24 @@ function resolveOrderCostChartDateRange(req) {
   const hasTo =
     toRaw != null &&
     String(Array.isArray(toRaw) ? toRaw[0] : toRaw).trim() !== "";
+
+  if (isEasyOrderApiRequest(req)) {
+    if (hasFrom && !hasTo) {
+      return resolveSingleDayFromQueryValue(fromRaw);
+    }
+    if (!hasFrom && hasTo) {
+      return resolveSingleDayFromQueryValue(toRaw);
+    }
+    if (hasFrom && hasTo) {
+      const fromStr = String(
+        Array.isArray(fromRaw) ? fromRaw[0] : fromRaw,
+      ).trim();
+      const toStr = String(Array.isArray(toRaw) ? toRaw[0] : toRaw).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(fromStr) && fromStr === toStr) {
+        return getEgyptDayRange(fromStr);
+      }
+    }
+  }
 
   if (!hasFrom && !hasTo) {
     if (isEasyOrderApiRequest(req)) {
@@ -1345,13 +1365,20 @@ async function saveOrderCostDailyHandler(req, res) {
 }
 
 /**
- * GET /api/easyorder/charts/order-cost — من البيانات المخزنة (أيام بلا سجل = 0).
+ * GET /api/easyorder/charts/order-cost — مصروفات مخزنة + أعداد live للأيام غير المسجّلة.
+ * فترة: from+to، أو يوم واحد عبر date=YYYY-MM-DD أو from=YYYY-MM-DD (بدون to).
  */
 async function getOrderCostChartHandler(req, res) {
   try {
     const granRaw = optionalQueryParam(req.query.granularity);
     const granularity =
       granRaw === "week" || granRaw === "month" ? granRaw : "day";
+
+    const dateBasisRaw = optionalQueryParam(
+      req.query.date_basis || req.query.dateBasis,
+    );
+    const dateBasis =
+      dateBasisRaw === "activity" ? "activity" : "created";
 
     let from;
     let to;
@@ -1373,15 +1400,22 @@ async function getOrderCostChartHandler(req, res) {
       from,
       to,
       granularity,
+      dateBasis,
     });
+
+    const singleDayKey =
+      getEgyptCalendarDateKey(from) === getEgyptCalendarDateKey(to)
+        ? getEgyptCalendarDateKey(from)
+        : null;
 
     res.json({
       success: true,
       filters: {
-        date: optionalQueryParam(req.query.date) || null,
+        date: optionalQueryParam(req.query.date) || singleDayKey,
         from: from.toISOString(),
         to: to.toISOString(),
         granularity,
+        date_basis: dateBasis,
       },
       chart,
     });

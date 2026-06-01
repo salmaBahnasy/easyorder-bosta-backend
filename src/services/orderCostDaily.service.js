@@ -75,16 +75,121 @@ function chartPointFromDailyRow(row) {
   };
 }
 
-function zeroChartPoint(date) {
-  const z = emptySeriesPoint();
+function chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap) {
+  const orders = ordersMap.get(date) || { totalOrders: 0, totalSales: 0 };
+  const shipped = shippedMap.get(date) || { totalOrders: 0, totalSales: 0 };
+  const delivered = deliveredMap.get(date) || { totalOrders: 0, totalSales: 0 };
+
   return {
     date,
     expense: 0,
     expenseEntered: false,
-    orders: { ...z },
-    shipped: { ...z },
-    delivered: { ...z },
-    successful: { ...z },
+    orders: seriesPointFromCounts(0, orders.totalOrders, orders.totalSales),
+    shipped: seriesPointFromCounts(0, shipped.totalOrders, shipped.totalSales),
+    delivered: seriesPointFromCounts(
+      0,
+      delivered.totalOrders,
+      delivered.totalSales,
+    ),
+    successful: seriesPointFromCounts(
+      0,
+      delivered.totalOrders,
+      delivered.totalSales,
+    ),
+  };
+}
+
+function buildDayChartPoint(date, storedRow, ordersMap, shippedMap, deliveredMap) {
+  if (storedRow) {
+    return chartPointFromDailyRow(storedRow);
+  }
+  return chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap);
+}
+
+function aggregateDailyChartPoints(dailyPoints, bucketKey, granularity) {
+  const inBucket = dailyPoints.filter((p) => {
+    const bucket = getEgyptTrendBucketKey(
+      new Date(`${p.date}T12:00:00.000Z`),
+      granularity,
+    );
+    return bucket === bucketKey;
+  });
+
+  let expense = 0;
+  let expenseEntered = false;
+  let totalOrders = 0;
+  let totalSales = 0;
+  let shippedOrders = 0;
+  let shippedSales = 0;
+  let deliveredOrders = 0;
+  let deliveredSales = 0;
+
+  for (const p of inBucket) {
+    expense += Number(p.expense) || 0;
+    if (p.expenseEntered) expenseEntered = true;
+    totalOrders += p.orders.totalOrders;
+    totalSales += Number(p.orders.totalSales) || 0;
+    shippedOrders += p.shipped.totalOrders;
+    shippedSales += Number(p.shipped.totalSales) || 0;
+    deliveredOrders += p.delivered.totalOrders;
+    deliveredSales += Number(p.delivered.totalSales) || 0;
+  }
+
+  const deliveredPoint = seriesPointFromCounts(
+    expense,
+    deliveredOrders,
+    deliveredSales,
+  );
+
+  return {
+    date: bucketKey,
+    expense: roundMoney(expense),
+    expenseEntered,
+    orders: seriesPointFromCounts(expense, totalOrders, totalSales),
+    shipped: seriesPointFromCounts(expense, shippedOrders, shippedSales),
+    delivered: deliveredPoint,
+    successful: deliveredPoint,
+  };
+}
+
+function summarizeChartPoints(points) {
+  let summaryExpense = 0;
+  const summaryOrders = emptySeriesPoint();
+  const summaryShipped = emptySeriesPoint();
+  const summaryDelivered = emptySeriesPoint();
+
+  for (const p of points) {
+    summaryExpense += Number(p.expense) || 0;
+    summaryOrders.totalOrders += p.orders.totalOrders;
+    summaryOrders.totalSales += Number(p.orders.totalSales) || 0;
+    summaryShipped.totalOrders += p.shipped.totalOrders;
+    summaryShipped.totalSales += Number(p.shipped.totalSales) || 0;
+    summaryDelivered.totalOrders += p.delivered.totalOrders;
+    summaryDelivered.totalSales += Number(p.delivered.totalSales) || 0;
+  }
+
+  summaryOrders.costPerOrder = computeCostPerOrder(
+    summaryExpense,
+    summaryOrders.totalOrders,
+  );
+  summaryShipped.costPerOrder = computeCostPerOrder(
+    summaryExpense,
+    summaryShipped.totalOrders,
+  );
+  summaryDelivered.costPerOrder = computeCostPerOrder(
+    summaryExpense,
+    summaryDelivered.totalOrders,
+  );
+  summaryOrders.totalSales = roundMoney(summaryOrders.totalSales);
+  summaryShipped.totalSales = roundMoney(summaryShipped.totalSales);
+  summaryDelivered.totalSales = roundMoney(summaryDelivered.totalSales);
+
+  return {
+    expense: roundMoney(summaryExpense),
+    orders: summaryOrders,
+    shipped: summaryShipped,
+    delivered: summaryDelivered,
+    successful: summaryDelivered,
   };
 }
 
@@ -170,60 +275,33 @@ async function fetchOrderCostDailyRows(from, to) {
   return data || [];
 }
 
-function aggregateDailyRowsIntoBuckets(dailyRows, bucketKeys, granularity) {
-  const agg = new Map();
-
-  for (const key of bucketKeys) {
-    agg.set(key, {
-      expense: 0,
-      total_orders: 0,
-      shipped_orders: 0,
-      successful_orders: 0,
-      total_sales: 0,
-      shipped_sales: 0,
-      successful_sales: 0,
-    });
-  }
-
-  for (const row of dailyRows) {
-    const dateStr =
-      typeof row.cost_date === "string"
-        ? row.cost_date.slice(0, 10)
-        : String(row.cost_date).slice(0, 10);
-    const bucketKey = getEgyptTrendBucketKey(
-      new Date(`${dateStr}T12:00:00.000Z`),
-      granularity,
-    );
-    if (!bucketKey || !agg.has(bucketKey)) continue;
-
-    const b = agg.get(bucketKey);
-    b.expense += Number(row.expense) || 0;
-    b.total_orders += Number(row.total_orders) || 0;
-    b.shipped_orders += Number(row.shipped_orders) || 0;
-    b.successful_orders += Number(row.successful_orders) || 0;
-    b.total_sales += Number(row.total_sales) || 0;
-    b.shipped_sales += Number(row.shipped_sales) || 0;
-    b.successful_sales += Number(row.successful_sales) || 0;
-  }
-
-  return agg;
-}
-
 /**
- * جراف من البيانات المخزنة — أي يوم بلا سجل = أصفار.
+ * جراف: مصروفات من order_cost_daily؛ أيام بلا سجل = أعداد طلبات live + مصروف/تكلفة 0.
  */
 async function getOrderCostChartFromStorage({
   from,
   to,
   granularity = "day",
+  dateBasis = "created",
 }) {
   const gran =
     granularity === "week" || granularity === "month" ? granularity : "day";
 
+  const dayKeys = listEgyptTrendBucketKeys(from, to, "day");
   const bucketKeys = listEgyptTrendBucketKeys(from, to, gran);
-  const dailyRows = await fetchOrderCostDailyRows(from, to);
-  const byDate = new Map();
 
+  const [dailyRows, { ordersMap, shippedMap, deliveredMap }] = await Promise.all([
+    fetchOrderCostDailyRows(from, to),
+    computeOrderCostBucketMapsForRange({
+      from,
+      to,
+      dateBasis,
+      granularity: "day",
+      useEgyptBuckets: true,
+    }),
+  ]);
+
+  const byDate = new Map();
   for (const row of dailyRows) {
     const dateStr =
       typeof row.cost_date === "string"
@@ -232,98 +310,34 @@ async function getOrderCostChartFromStorage({
     byDate.set(dateStr, row);
   }
 
-  let points;
-  let summaryExpense = 0;
-  let summaryOrders = emptySeriesPoint();
-  let summaryShipped = emptySeriesPoint();
-  let summaryDelivered = emptySeriesPoint();
-
-  if (gran === "day") {
-    points = bucketKeys.map((date) => {
-      const row = byDate.get(date);
-      if (!row) {
-        return zeroChartPoint(date);
-      }
-      return chartPointFromDailyRow(row);
-    });
-
-    for (const p of points) {
-      summaryExpense += Number(p.expense) || 0;
-      summaryOrders.totalOrders += p.orders.totalOrders;
-      summaryOrders.totalSales += Number(p.orders.totalSales) || 0;
-      summaryShipped.totalOrders += p.shipped.totalOrders;
-      summaryShipped.totalSales += Number(p.shipped.totalSales) || 0;
-      summaryDelivered.totalOrders += p.delivered.totalOrders;
-      summaryDelivered.totalSales += Number(p.delivered.totalSales) || 0;
-    }
-  } else {
-    const agg = aggregateDailyRowsIntoBuckets(dailyRows, bucketKeys, gran);
-    points = bucketKeys.map((date) => {
-      const b = agg.get(date) || {
-        expense: 0,
-        total_orders: 0,
-        shipped_orders: 0,
-        successful_orders: 0,
-        total_sales: 0,
-        shipped_sales: 0,
-        successful_sales: 0,
-      };
-      return chartPointFromDailyRow({
-        cost_date: date,
-        expense: b.expense,
-        total_orders: b.total_orders,
-        shipped_orders: b.shipped_orders,
-        successful_orders: b.successful_orders,
-        total_sales: b.total_sales,
-        shipped_sales: b.shipped_sales,
-        successful_sales: b.successful_sales,
-      });
-    });
-
-    for (const p of points) {
-      summaryExpense += Number(p.expense) || 0;
-      summaryOrders.totalOrders += p.orders.totalOrders;
-      summaryOrders.totalSales += Number(p.orders.totalSales) || 0;
-      summaryShipped.totalOrders += p.shipped.totalOrders;
-      summaryShipped.totalSales += Number(p.shipped.totalSales) || 0;
-      summaryDelivered.totalOrders += p.delivered.totalOrders;
-      summaryDelivered.totalSales += Number(p.delivered.totalSales) || 0;
-    }
-  }
-
-  summaryOrders.costPerOrder = computeCostPerOrder(
-    summaryExpense,
-    summaryOrders.totalOrders,
+  const dailyPoints = dayKeys.map((date) =>
+    buildDayChartPoint(date, byDate.get(date), ordersMap, shippedMap, deliveredMap),
   );
-  summaryShipped.costPerOrder = computeCostPerOrder(
-    summaryExpense,
-    summaryShipped.totalOrders,
-  );
-  summaryDelivered.costPerOrder = computeCostPerOrder(
-    summaryExpense,
-    summaryDelivered.totalOrders,
-  );
-  summaryOrders.totalSales = roundMoney(summaryOrders.totalSales);
-  summaryShipped.totalSales = roundMoney(summaryShipped.totalSales);
-  summaryDelivered.totalSales = roundMoney(summaryDelivered.totalSales);
+
+  const points =
+    gran === "day"
+      ? dailyPoints
+      : bucketKeys.map((bucketKey) =>
+          aggregateDailyChartPoints(dailyPoints, bucketKey, gran),
+        );
+
+  const summary = summarizeChartPoints(points);
+  const liveFilledDaysCount = dayKeys.filter((d) => !byDate.has(d)).length;
 
   return {
     source: "database",
     from: from.toISOString(),
     to: to.toISOString(),
     granularity: gran,
+    dateBasis,
     formulaAr:
-      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. الأيام بدون إدخال = 0. البيانات من order_cost_daily.",
+      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. يوم مسجّل = مصروفات محفوظة. يوم غير مسجّل = عدد الطلبات من النظام والمصروف/التكلفة = 0.",
     points,
-    summary: {
-      expense: roundMoney(summaryExpense),
-      orders: summaryOrders,
-      shipped: summaryShipped,
-      delivered: summaryDelivered,
-      successful: summaryDelivered,
-    },
+    summary,
     storedDaysCount: dailyRows.length,
-    daysInRange: bucketKeys.length,
+    liveFilledDaysCount,
+    daysInRange: dayKeys.length,
+    bucketsInRange: bucketKeys.length,
   };
 }
 
