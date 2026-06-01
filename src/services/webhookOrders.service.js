@@ -134,6 +134,24 @@ function isInstantInRange(instant, from, to) {
   return true;
 }
 
+/** طلب حالته تم الشحن (عمود orders.status أو raw_data) */
+function isShippedOrder(row, raw) {
+  if (String(row?.status || "").trim() === "Shipped") {
+    return true;
+  }
+  if (!raw || typeof raw !== "object") {
+    return false;
+  }
+  for (const key of ["orderStatus", "order_status", "status"]) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    const normalized = normalizeOrderStatusInput(raw[key]);
+    if (normalized === "Shipped") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function syncShippingStatusAliases(rawData) {
   if (!rawData || typeof rawData !== "object") return rawData;
   const effective = resolveEffectiveShippingStatus(rawData);
@@ -3097,9 +3115,10 @@ function finalizeOrderCostChartPoint(expenseAmount, bucket) {
 }
 
 /**
- * تكلفة اكتساب الطلب: المصروفات ÷ عدد الطلبات (كل الحالات).
- * orders = أي طلب ضمن الفترة (بدون شرط حالة الطلب)
- * delivered = فرعي: حالة الشحن تم التوصيل (delivered) — اختياري للمقارنة
+ * تكلفة اكتساب الطلب: المصروفات ÷ عدد الطلبات.
+ * orders = كل الطلبات (أي حالة)
+ * shipped = حالة الطلب تم الشحن (Shipped)
+ * delivered = حالة الشحن تم التوصيل (delivered)
  */
 async function getOrderCostMetrics({
   expense,
@@ -3122,6 +3141,8 @@ async function getOrderCostMetrics({
 
   let totalOrders = 0;
   let totalSales = 0;
+  let shippedOrders = 0;
+  let shippedSales = 0;
   let deliveredOrders = 0;
   let deliveredSales = 0;
   let offset = 0;
@@ -3176,6 +3197,11 @@ async function getOrderCostMetrics({
       totalOrders += 1;
       totalSales += sales;
 
+      if (isShippedOrder(row, raw)) {
+        shippedOrders += 1;
+        shippedSales += sales;
+      }
+
       if (isDeliveredShipping(raw)) {
         deliveredOrders += 1;
         deliveredSales += sales;
@@ -3196,6 +3222,11 @@ async function getOrderCostMetrics({
     totalOrders,
     totalSales,
   );
+  const shippedBucket = buildOrderCostBucket(
+    expenseAmount,
+    shippedOrders,
+    shippedSales,
+  );
   const deliveredBucket = buildOrderCostBucket(
     expenseAmount,
     deliveredOrders,
@@ -3210,24 +3241,22 @@ async function getOrderCostMetrics({
     dateBasis: useCreatedAtColumn ? "created" : "activity",
     dateBasisDescriptionAr,
     orders: {
-      labelAr: "تكلفة الطلب",
+      labelAr: "تكلفة الطلب (كل الطلبات)",
       descriptionAr:
         "المصروفات ÷ عدد كل الطلبات ضمن الفترة (أي حالة طلب)",
       ...ordersBucket,
+    },
+    shipped: {
+      labelAr: "تكلفة الطلب المشحون",
+      descriptionAr:
+        "المصروفات ÷ عدد الطلبات التي حالتها تم الشحن (Shipped)",
+      ...shippedBucket,
     },
     delivered: {
       labelAr: "تكلفة الطلب (تم التوصيل)",
       descriptionAr:
         "المصروفات ÷ عدد الطلبات التي حالة الشحن فيها تم التوصيل (delivered)",
       ...deliveredBucket,
-    },
-    /** @deprecated استخدم orders — نفس الأرقام */
-    shipped: {
-      labelAr: "تكلفة الطلب",
-      descriptionAr: ordersBucket.totalOrders
-        ? "نفس orders — كل الطلبات"
-        : "نفس orders",
-      ...ordersBucket,
     },
     /** @deprecated استخدم delivered */
     successful: {
@@ -3270,7 +3299,7 @@ function pickCostChartBucketInstant(row, raw, dateBasis, from, to) {
 
 /**
  * جراف تكلفة الطلب الواحد عبر الزمن (يوم / أسبوع / شهر).
- * كل الطلبات (أي حالة) — costPerOrder = expense ÷ totalOrders؛ بدون expense = 0.
+ * orders = كل الطلبات | shipped = Shipped | delivered = توصيل ناجح
  */
 async function getOrderCostChart({
   expense,
@@ -3297,6 +3326,7 @@ async function getOrderCostChart({
   const bucketKeySet = new Set(bucketKeys);
 
   const ordersMap = new Map();
+  const shippedMap = new Map();
   const deliveredMap = new Map();
   let offset = 0;
   let truncated = false;
@@ -3374,6 +3404,15 @@ async function getOrderCostChart({
       ordersBucket.totalOrders += 1;
       ordersBucket.totalSales += sales;
 
+      if (isShippedOrder(row, raw)) {
+        if (!shippedMap.has(bucketDate)) {
+          shippedMap.set(bucketDate, emptyOrderCostSeriesBucket());
+        }
+        const shippedBucket = shippedMap.get(bucketDate);
+        shippedBucket.totalOrders += 1;
+        shippedBucket.totalSales += sales;
+      }
+
       if (isDeliveredShipping(raw)) {
         if (!deliveredMap.has(bucketDate)) {
           deliveredMap.set(bucketDate, emptyOrderCostSeriesBucket());
@@ -3392,25 +3431,31 @@ async function getOrderCostChart({
 
   const points = sortedBucketKeys.map((date) => {
     const orders = ordersMap.get(date) || emptyOrderCostSeriesBucket();
+    const shipped = shippedMap.get(date) || emptyOrderCostSeriesBucket();
     const delivered = deliveredMap.get(date) || emptyOrderCostSeriesBucket();
     const ordersPoint = finalizeOrderCostChartPoint(expenseAmount, orders);
+    const shippedPoint = finalizeOrderCostChartPoint(expenseAmount, shipped);
     const deliveredPoint = finalizeOrderCostChartPoint(expenseAmount, delivered);
     return {
       date,
       orders: ordersPoint,
+      shipped: shippedPoint,
       delivered: deliveredPoint,
-      /** @deprecated استخدم orders */
-      shipped: ordersPoint,
       /** @deprecated استخدم delivered */
       successful: deliveredPoint,
     };
   });
 
   let summaryOrders = emptyOrderCostSeriesBucket();
+  let summaryShipped = emptyOrderCostSeriesBucket();
   let summaryDelivered = emptyOrderCostSeriesBucket();
   for (const b of ordersMap.values()) {
     summaryOrders.totalOrders += b.totalOrders;
     summaryOrders.totalSales += b.totalSales;
+  }
+  for (const b of shippedMap.values()) {
+    summaryShipped.totalOrders += b.totalOrders;
+    summaryShipped.totalSales += b.totalSales;
   }
   for (const b of deliveredMap.values()) {
     summaryDelivered.totalOrders += b.totalOrders;
@@ -3420,6 +3465,10 @@ async function getOrderCostChart({
   const summaryOrdersPoint = finalizeOrderCostChartPoint(
     expenseAmount,
     summaryOrders,
+  );
+  const summaryShippedPoint = finalizeOrderCostChartPoint(
+    expenseAmount,
+    summaryShipped,
   );
   const summaryDeliveredPoint = finalizeOrderCostChartPoint(
     expenseAmount,
@@ -3438,8 +3487,7 @@ async function getOrderCostChart({
     expense: roundMoney(expenseAmount),
     expenseEntered: expenseAmount > 0,
     formulaAr:
-      "تكلفة الطلب = المصروفات ÷ عدد الطلبات (أي حالة). بدون مصروفات = 0",
-    countsAllOrderStatuses: true,
+      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. بدون مصروفات = 0",
     dateBasis: useCreatedAtColumn ? "created" : "activity",
     dateBasisDescriptionAr: useCreatedAtColumn
       ? "الفترة على orders.created_at"
@@ -3447,8 +3495,8 @@ async function getOrderCostChart({
     points,
     summary: {
       orders: summaryOrdersPoint,
+      shipped: summaryShippedPoint,
       delivered: summaryDeliveredPoint,
-      shipped: summaryOrdersPoint,
       successful: summaryDeliveredPoint,
     },
     ordersMatched,
