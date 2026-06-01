@@ -108,6 +108,32 @@ function isDeliveredShipping(raw) {
   return snake === "delivered" || camel === "delivered";
 }
 
+/** تاريخ يُستخدم لفلترة تكلفة الطلبات (آخر تحديث أو إنشاء). */
+function pickOrderActivityDate(row, raw) {
+  const candidates = [
+    raw?.updated_at,
+    raw?.updatedAt,
+    raw?.created_at,
+    raw?.createdAt,
+    raw?.created_day,
+    row?.created_at,
+  ];
+  for (const c of candidates) {
+    if (c == null) continue;
+    const d = new Date(c);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return null;
+}
+
+function isInstantInRange(instant, from, to) {
+  if (!instant || Number.isNaN(instant.getTime())) return false;
+  const t = instant.getTime();
+  if (from && t < from.getTime()) return false;
+  if (to && t > to.getTime()) return false;
+  return true;
+}
+
 function syncShippingStatusAliases(rawData) {
   if (!rawData || typeof rawData !== "object") return rawData;
   const effective = resolveEffectiveShippingStatus(rawData);
@@ -3034,27 +3060,55 @@ function roundMoney(value) {
 }
 
 function buildOrderCostBucket(expenseAmount, totalOrders, totalSales) {
-  const costPerOrder =
-    totalOrders > 0 ? expenseAmount / totalOrders : null;
+  const expense = Number(expenseAmount);
+  const costPerOrder = computeCostPerOrder(expense, totalOrders);
   const salesPerOrder = totalOrders > 0 ? totalSales / totalOrders : null;
   const salesPerExpense =
-    expenseAmount > 0 ? totalSales / expenseAmount : null;
+    expense > 0 ? totalSales / expense : null;
 
   return {
     totalOrders,
     totalSales: roundMoney(totalSales),
     salesPerOrder: roundMoney(salesPerOrder),
-    costPerOrder: roundMoney(costPerOrder),
+    costPerOrder,
     salesPerExpense: roundMoney(salesPerExpense),
+  };
+}
+
+/** تكلفة الطلب = المصروفات ÷ عدد الطلبات؛ بدون مصروفات = 0 */
+function computeCostPerOrder(expenseAmount, totalOrders) {
+  const expense = Number(expenseAmount);
+  if (!Number.isFinite(expense) || expense <= 0 || totalOrders <= 0) {
+    return 0;
+  }
+  return roundMoney(expense / totalOrders);
+}
+
+function emptyOrderCostSeriesBucket() {
+  return { totalOrders: 0, totalSales: 0 };
+}
+
+function finalizeOrderCostChartPoint(expenseAmount, bucket) {
+  return {
+    totalOrders: bucket.totalOrders,
+    totalSales: roundMoney(bucket.totalSales),
+    costPerOrder: computeCostPerOrder(expenseAmount, bucket.totalOrders),
   };
 }
 
 /**
  * تكلفة اكتساب الطلب: المصروفات ÷ عدد الطلبات (مشحون / مشحون+توصيل ناجح).
  * shipped = orders.status Shipped
- * successful = Shipped + raw_data shipping_status delivered
+ * successful = Shipped + shipping delivered (أي من shipping_status / shippingStatus)
+ * dateBasis=activity (افتراضي): الفترة على آخر تحديث/إنشاء في raw_data
+ * dateBasis=created: الفترة على orders.created_at فقط
  */
-async function getOrderCostMetrics({ expense, from, to }) {
+async function getOrderCostMetrics({
+  expense,
+  from,
+  to,
+  dateBasis = "activity",
+}) {
   const expenseAmount = Number(expense);
   if (!Number.isFinite(expenseAmount) || expenseAmount < 0) {
     const err = new Error("expense must be a non-negative number");
@@ -3062,32 +3116,37 @@ async function getOrderCostMetrics({ expense, from, to }) {
     throw err;
   }
 
+  const useCreatedAtColumn = dateBasis === "created";
+
   let shippedOrders = 0;
   let shippedSales = 0;
   let successfulOrders = 0;
   let successfulSales = 0;
   let offset = 0;
   let truncated = false;
+  let rowsScanned = 0;
 
   for (;;) {
-    if (shippedOrders >= MAX_ORDER_COST_ROWS) {
+    if (rowsScanned >= MAX_ORDER_COST_ROWS) {
       truncated = true;
       break;
     }
 
     let q = supabase
       .from(ORDERS_TABLE)
-      .select("order_id,raw_data,status")
+      .select("order_id,created_at,raw_data,status")
       .eq("status", "Shipped");
 
-    if (from) {
-      q = q.gte("created_at", from.toISOString());
-    }
-    if (to) {
-      q = q.lte("created_at", to.toISOString());
+    if (useCreatedAtColumn) {
+      if (from) {
+        q = q.gte("created_at", from.toISOString());
+      }
+      if (to) {
+        q = q.lte("created_at", to.toISOString());
+      }
     }
 
-    const remaining = MAX_ORDER_COST_ROWS - shippedOrders;
+    const remaining = MAX_ORDER_COST_ROWS - rowsScanned;
     const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
     q = q.range(offset, offset + pageSize - 1);
 
@@ -3096,12 +3155,21 @@ async function getOrderCostMetrics({ expense, from, to }) {
     if (!data || data.length === 0) break;
 
     for (const row of data) {
+      rowsScanned += 1;
       const raw =
         row.raw_data &&
         typeof row.raw_data === "object" &&
         !Array.isArray(row.raw_data)
           ? row.raw_data
           : {};
+
+      if (!useCreatedAtColumn) {
+        const activityDate = pickOrderActivityDate(row, raw);
+        if (!isInstantInRange(activityDate, from, to)) {
+          continue;
+        }
+      }
+
       const sales = pickOrderTotalCost(raw);
 
       shippedOrders += 1;
@@ -3117,20 +3185,27 @@ async function getOrderCostMetrics({ expense, from, to }) {
     offset += pageSize;
   }
 
+  const dateBasisDescriptionAr =
+    useCreatedAtColumn
+      ? "الفترة تُطبَّق على تاريخ إنشاء الطلب في النظام (orders.created_at)"
+      : "الفترة تُطبَّق على آخر تحديث للطلب (updated_at) أو تاريخ الإنشاء إن لم يوجد تحديث";
+
   return {
     expense: roundMoney(expenseAmount),
     from: from.toISOString(),
     to: to.toISOString(),
+    dateBasis: useCreatedAtColumn ? "created" : "activity",
+    dateBasisDescriptionAr,
     shipped: {
       labelAr: "تكلفة الطلب المشحون",
       descriptionAr:
-        "المصروفات ÷ عدد الطلبات التي حالتها تم الشحن (Shipped)",
+        "المصروفات ÷ عدد الطلبات التي حالتها تم الشحن (Shipped) ضمن الفترة",
       ...buildOrderCostBucket(expenseAmount, shippedOrders, shippedSales),
     },
     successful: {
       labelAr: "تكلفة الطلب الناجح",
       descriptionAr:
-        "المصروفات ÷ عدد الطلبات التي حالتها تم الشحن وحالة الشحن تم التوصيل (delivered)",
+        "المصروفات ÷ عدد الطلبات المشحونة (Shipped) وحالة الشحن تم التوصيل (delivered) ضمن الفترة",
       ...buildOrderCostBucket(
         expenseAmount,
         successfulOrders,
@@ -3140,7 +3215,163 @@ async function getOrderCostMetrics({ expense, from, to }) {
     successfulShippingStatus: SUCCESSFUL_SHIPPING_STATUS,
     truncated,
     maxRowsCap: MAX_ORDER_COST_ROWS,
+    rowsScanned,
   };
+}
+
+/**
+ * جراف تكلفة الطلب الواحد عبر الزمن (يوم / أسبوع / شهر).
+ * costPerOrder = expense ÷ totalOrders في كل فترة؛ بدون expense = 0.
+ */
+async function getOrderCostChart({
+  expense,
+  from,
+  to,
+  granularity = "day",
+  dateBasis = "activity",
+  useEgyptBuckets = false,
+}) {
+  const expenseAmount = parseExpenseForCostChart(expense);
+
+  const gran =
+    granularity === "week" || granularity === "month" ? granularity : "day";
+
+  const bucketKeyForDate = useEgyptBuckets
+    ? (date, g) => getEgyptTrendBucketKey(date, g)
+    : (date, g) => bucketKeyFromDate(date, g);
+  const listBucketKeys = useEgyptBuckets
+    ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
+    : (f, t, g) => listTrendBucketKeys(f, t, g);
+
+  const useCreatedAtColumn = dateBasis === "created";
+  const bucketKeys = listBucketKeys(from, to, gran);
+
+  const shippedMap = new Map();
+  const successfulMap = new Map();
+  let offset = 0;
+  let truncated = false;
+  let rowsScanned = 0;
+
+  for (;;) {
+    if (rowsScanned >= MAX_ORDER_COST_ROWS) {
+      truncated = true;
+      break;
+    }
+
+    let q = supabase
+      .from(ORDERS_TABLE)
+      .select("order_id,created_at,raw_data,status")
+      .eq("status", "Shipped");
+
+    if (useCreatedAtColumn) {
+      if (from) q = q.gte("created_at", from.toISOString());
+      if (to) q = q.lte("created_at", to.toISOString());
+    }
+
+    const remaining = MAX_ORDER_COST_ROWS - rowsScanned;
+    const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+    q = q.range(offset, offset + pageSize - 1);
+
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    if (!data || data.length === 0) break;
+
+    for (const row of data) {
+      rowsScanned += 1;
+      const raw =
+        row.raw_data &&
+        typeof row.raw_data === "object" &&
+        !Array.isArray(row.raw_data)
+          ? row.raw_data
+          : {};
+
+      const activityDate = useCreatedAtColumn
+        ? new Date(row.created_at)
+        : pickOrderActivityDate(row, raw);
+
+      if (!useCreatedAtColumn && !isInstantInRange(activityDate, from, to)) {
+        continue;
+      }
+
+      const bucketDate = bucketKeyForDate(
+        useCreatedAtColumn ? row.created_at : activityDate,
+        gran,
+      );
+      if (!bucketDate || !bucketKeys.includes(bucketDate)) continue;
+
+      const sales = pickOrderTotalCost(raw);
+
+      if (!shippedMap.has(bucketDate)) {
+        shippedMap.set(bucketDate, emptyOrderCostSeriesBucket());
+      }
+      const shippedBucket = shippedMap.get(bucketDate);
+      shippedBucket.totalOrders += 1;
+      shippedBucket.totalSales += sales;
+
+      if (isDeliveredShipping(raw)) {
+        if (!successfulMap.has(bucketDate)) {
+          successfulMap.set(bucketDate, emptyOrderCostSeriesBucket());
+        }
+        const successBucket = successfulMap.get(bucketDate);
+        successBucket.totalOrders += 1;
+        successBucket.totalSales += sales;
+      }
+    }
+
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  const points = bucketKeys.map((date) => {
+    const shipped =
+      shippedMap.get(date) || emptyOrderCostSeriesBucket();
+    const successful =
+      successfulMap.get(date) || emptyOrderCostSeriesBucket();
+    return {
+      date,
+      shipped: finalizeOrderCostChartPoint(expenseAmount, shipped),
+      successful: finalizeOrderCostChartPoint(expenseAmount, successful),
+    };
+  });
+
+  let summaryShipped = emptyOrderCostSeriesBucket();
+  let summarySuccessful = emptyOrderCostSeriesBucket();
+  for (const b of shippedMap.values()) {
+    summaryShipped.totalOrders += b.totalOrders;
+    summaryShipped.totalSales += b.totalSales;
+  }
+  for (const b of successfulMap.values()) {
+    summarySuccessful.totalOrders += b.totalOrders;
+    summarySuccessful.totalSales += b.totalSales;
+  }
+
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    granularity: gran,
+    expense: roundMoney(expenseAmount),
+    expenseEntered: expenseAmount > 0,
+    formulaAr: "تكلفة الطلب = المصروفات ÷ عدد الطلبات (0 إذا لم تُدخل مصروفات)",
+    dateBasis: useCreatedAtColumn ? "created" : "activity",
+    points,
+    summary: {
+      shipped: finalizeOrderCostChartPoint(expenseAmount, summaryShipped),
+      successful: finalizeOrderCostChartPoint(
+        expenseAmount,
+        summarySuccessful,
+      ),
+    },
+    truncated,
+    maxRowsCap: MAX_ORDER_COST_ROWS,
+    rowsScanned,
+  };
+}
+
+function parseExpenseForCostChart(raw) {
+  if (raw == null || String(raw).trim() === "") return 0;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return n;
 }
 
 module.exports = {
@@ -3153,6 +3384,7 @@ module.exports = {
   getOrdersStatsTimeSeries,
   getProductSalesChart,
   getOrderCostMetrics,
+  getOrderCostChart,
   getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,

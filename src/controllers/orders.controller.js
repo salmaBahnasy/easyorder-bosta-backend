@@ -10,6 +10,7 @@ const {
   getOrdersAnalyticsReport,
   getProductSalesChart,
   getOrderCostMetrics,
+  getOrderCostChart,
   getWebhookOrderByReference,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
@@ -1181,7 +1182,18 @@ async function getOrderCosts(req, res) {
       throw error;
     }
 
-    const metrics = await getOrderCostMetrics({ expense, from, to });
+    const dateBasisRaw = optionalQueryParam(
+      req.query.date_basis || req.query.dateBasis,
+    );
+    const dateBasis =
+      dateBasisRaw === "created" ? "created" : "activity";
+
+    const metrics = await getOrderCostMetrics({
+      expense,
+      from,
+      to,
+      dateBasis,
+    });
 
     res.json({
       success: true,
@@ -1190,6 +1202,7 @@ async function getOrderCosts(req, res) {
         date: optionalQueryParam(req.query.date) || null,
         from: from.toISOString(),
         to: to.toISOString(),
+        date_basis: dateBasis,
       },
       metrics,
     });
@@ -1210,6 +1223,77 @@ async function getOrderCosts(req, res) {
   }
 }
 
+/**
+ * GET /api/orders/charts/order-cost
+ * GET /api/easyorder/charts/order-cost
+ *
+ * Time-series: cost per order = expense ÷ orders per bucket (0 if no expense).
+ */
+async function getOrderCostChartHandler(req, res) {
+  try {
+    const expenseRaw =
+      req.query.expense ?? req.query.spent ?? req.query.spend;
+
+    const granRaw = optionalQueryParam(req.query.granularity);
+    const granularity =
+      granRaw === "week" || granRaw === "month" ? granRaw : "day";
+
+    const dateBasisRaw = optionalQueryParam(
+      req.query.date_basis || req.query.dateBasis,
+    );
+    const dateBasis =
+      dateBasisRaw === "created" ? "created" : "activity";
+
+    let from;
+    let to;
+    try {
+      ({ from, to } = resolveOrderCostsDateRange(req));
+    } catch (error) {
+      if (
+        error.code === "INVALID_FROM" ||
+        error.code === "INVALID_TO" ||
+        error.code === "INVALID_DATE"
+      ) {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      throw error;
+    }
+
+    const chart = await getOrderCostChart({
+      expense: expenseRaw,
+      from,
+      to,
+      granularity,
+      dateBasis,
+      useEgyptBuckets: isEasyOrderApiRequest(req),
+    });
+
+    res.json({
+      success: true,
+      filters: {
+        expense:
+          expenseRaw != null && String(expenseRaw).trim() !== ""
+            ? Number(expenseRaw)
+            : null,
+        expenseEntered: chart.expenseEntered,
+        date: optionalQueryParam(req.query.date) || null,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity,
+        date_basis: dateBasis,
+      },
+      chart,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to build order cost chart",
+      error: error.message,
+    });
+  }
+}
+
 module.exports = {
   createOrder,
   updateOrder,
@@ -1223,4 +1307,5 @@ module.exports = {
   getOrdersAnalytics,
   getProductSalesChartHandler,
   getOrderCosts,
+  getOrderCostChartHandler,
 };
