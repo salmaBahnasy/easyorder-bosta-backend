@@ -10,7 +10,6 @@ const {
   getOrdersAnalyticsReport,
   getProductSalesChart,
   getOrderCostMetrics,
-  getOrderCostChart,
   getWebhookOrderByReference,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
@@ -25,6 +24,10 @@ const {
   getEgyptLast30DaysRange,
   isEasyOrderApiRequest,
 } = require("../utils/dateRange");
+const {
+  saveOrderCostDailyEntry,
+  getOrderCostChartFromStorage,
+} = require("../services/orderCostDaily.service");
 
 /** مثال لجسم POST /api/orders — الحقول الاختيارية: order_source (افتراضي store)، order_type (افتراضي new)، shipping_status (افتراضي in_progress)، status (افتراضي new). */
 const POST_ORDER_MANUAL_EXAMPLE = {
@@ -1266,25 +1269,89 @@ async function getOrderCosts(req, res) {
 }
 
 /**
- * GET /api/orders/charts/order-cost
- * GET /api/easyorder/charts/order-cost
- *
- * Time-series: cost per order = expense ÷ orders per bucket (0 if no expense).
+ * POST /api/easyorder/charts/order-cost
+ * Body: { date: "YYYY-MM-DD", expense: number }
  */
-async function getOrderCostChartHandler(req, res) {
+async function saveOrderCostDailyHandler(req, res) {
   try {
+    const dateRaw =
+      req.body?.date ?? req.query.date ?? req.body?.cost_date;
     const expenseRaw =
-      req.query.expense ?? req.query.spent ?? req.query.spend;
+      req.body?.expense ??
+      req.query.expense ??
+      req.body?.spent ??
+      req.query.spent;
 
-    const granRaw = optionalQueryParam(req.query.granularity);
-    const granularity =
-      granRaw === "week" || granRaw === "month" ? granRaw : "day";
+    if (dateRaw == null || String(dateRaw).trim() === "") {
+      res.status(400).json({
+        success: false,
+        message: 'date is required (YYYY-MM-DD)',
+      });
+      return;
+    }
+
+    if (expenseRaw == null || String(expenseRaw).trim() === "") {
+      res.status(400).json({
+        success: false,
+        message: "expense is required (non-negative number)",
+      });
+      return;
+    }
+
+    const expense = Number(expenseRaw);
+    if (!Number.isFinite(expense) || expense < 0) {
+      res.status(400).json({
+        success: false,
+        message: "expense must be a non-negative number",
+      });
+      return;
+    }
 
     const dateBasisRaw = optionalQueryParam(
-      req.query.date_basis || req.query.dateBasis,
+      req.body?.date_basis ||
+        req.body?.dateBasis ||
+        req.query.date_basis ||
+        req.query.dateBasis,
     );
     const dateBasis =
       dateBasisRaw === "activity" ? "activity" : "created";
+
+    const result = await saveOrderCostDailyEntry({
+      date: dateRaw,
+      expense,
+      dateBasis,
+    });
+
+    res.status(201).json({
+      success: true,
+      message: "Daily order cost saved",
+      data: result.saved,
+      chartPoint: result.chartPoint,
+    });
+  } catch (error) {
+    if (
+      error.code === "INVALID_DATE" ||
+      error.code === "INVALID_EXPENSE"
+    ) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to save daily order cost",
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * GET /api/easyorder/charts/order-cost — من البيانات المخزنة (أيام بلا سجل = 0).
+ */
+async function getOrderCostChartHandler(req, res) {
+  try {
+    const granRaw = optionalQueryParam(req.query.granularity);
+    const granularity =
+      granRaw === "week" || granRaw === "month" ? granRaw : "day";
 
     let from;
     let to;
@@ -1302,28 +1369,19 @@ async function getOrderCostChartHandler(req, res) {
       throw error;
     }
 
-    const chart = await getOrderCostChart({
-      expense: expenseRaw,
+    const chart = await getOrderCostChartFromStorage({
       from,
       to,
       granularity,
-      dateBasis,
-      useEgyptBuckets: isEasyOrderApiRequest(req),
     });
 
     res.json({
       success: true,
       filters: {
-        expense:
-          expenseRaw != null && String(expenseRaw).trim() !== ""
-            ? Number(expenseRaw)
-            : null,
-        expenseEntered: chart.expenseEntered,
         date: optionalQueryParam(req.query.date) || null,
         from: from.toISOString(),
         to: to.toISOString(),
         granularity,
-        date_basis: dateBasis,
       },
       chart,
     });
@@ -1350,4 +1408,5 @@ module.exports = {
   getProductSalesChartHandler,
   getOrderCosts,
   getOrderCostChartHandler,
+  saveOrderCostDailyHandler,
 };

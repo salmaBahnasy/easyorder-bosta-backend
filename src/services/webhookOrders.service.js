@@ -3300,30 +3300,25 @@ function pickCostChartBucketInstant(row, raw, dateBasis, from, to) {
 /**
  * جراف تكلفة الطلب الواحد عبر الزمن (يوم / أسبوع / شهر).
  * orders = كل الطلبات | shipped = Shipped | delivered = توصيل ناجح
+ * (حساب مباشر من orders — للحفظ اليومي يُستخدم computeOrderCostBucketMapsForRange)
  */
-async function getOrderCostChart({
-  expense,
+async function computeOrderCostBucketMapsForRange({
   from,
   to,
-  granularity = "day",
   dateBasis = "created",
+  granularity = "day",
   useEgyptBuckets = false,
 }) {
-  const expenseAmount = parseExpenseForCostChart(expense);
-
   const gran =
     granularity === "week" || granularity === "month" ? granularity : "day";
 
   const bucketKeyForDate = useEgyptBuckets
     ? (date, g) => getEgyptTrendBucketKey(date, g)
     : (date, g) => bucketKeyFromDate(date, g);
-  const listBucketKeys = useEgyptBuckets
-    ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
-    : (f, t, g) => listTrendBucketKeys(f, t, g);
 
   const useCreatedAtColumn = dateBasis === "created";
-  const bucketKeys = listBucketKeys(from, to, gran);
-  const bucketKeySet = new Set(bucketKeys);
+  const bucketKeys = [];
+  const bucketKeySet = new Set();
 
   const ordersMap = new Map();
   const shippedMap = new Map();
@@ -3427,7 +3422,49 @@ async function getOrderCostChart({
     offset += pageSize;
   }
 
-  const sortedBucketKeys = [...bucketKeys].sort();
+  return {
+    ordersMap,
+    shippedMap,
+    deliveredMap,
+    bucketKeys,
+    rowsScanned,
+    ordersMatched,
+    truncated,
+  };
+}
+
+async function getOrderCostChart({
+  expense,
+  from,
+  to,
+  granularity = "day",
+  dateBasis = "created",
+  useEgyptBuckets = false,
+}) {
+  const expenseAmount = parseExpenseForCostChart(expense);
+  const gran =
+    granularity === "week" || granularity === "month" ? granularity : "day";
+  const useCreatedAtColumn = dateBasis === "created";
+
+  const {
+    ordersMap,
+    shippedMap,
+    deliveredMap,
+    rowsScanned,
+    ordersMatched,
+    truncated,
+  } = await computeOrderCostBucketMapsForRange({
+    from,
+    to,
+    dateBasis,
+    granularity: gran,
+    useEgyptBuckets,
+  });
+
+  const listBucketKeys = useEgyptBuckets
+    ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
+    : (f, t, g) => listTrendBucketKeys(f, t, g);
+  const sortedBucketKeys = listBucketKeys(from, to, gran);
 
   const points = sortedBucketKeys.map((date) => {
     const orders = ordersMap.get(date) || emptyOrderCostSeriesBucket();
@@ -3441,7 +3478,6 @@ async function getOrderCostChart({
       orders: ordersPoint,
       shipped: shippedPoint,
       delivered: deliveredPoint,
-      /** @deprecated استخدم delivered */
       successful: deliveredPoint,
     };
   });
@@ -3481,6 +3517,7 @@ async function getOrderCostChart({
       : null;
 
   return {
+    source: "live",
     from: from.toISOString(),
     to: to.toISOString(),
     granularity: gran,
@@ -3525,6 +3562,9 @@ module.exports = {
   getProductSalesChart,
   getOrderCostMetrics,
   getOrderCostChart,
+  computeOrderCostBucketMapsForRange,
+  computeCostPerOrder,
+  roundMoney,
   getOrdersAnalyticsReport,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,

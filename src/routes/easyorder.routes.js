@@ -7,6 +7,7 @@ const {
   getProductSalesChartHandler,
   getOrderCosts,
   getOrderCostChartHandler,
+  saveOrderCostDailyHandler,
 } = require("../controllers/orders.controller");
 const ordersRoutes = require("./orders.routes");
 const employeesRoutes = require("./employees.routes");
@@ -27,6 +28,7 @@ router.post("/auth/login", login);
 router.get("/stats", getOrdersStats);
 router.get("/analytics", getOrdersAnalytics);
 router.get("/charts/product-sales", getProductSalesChartHandler);
+router.post("/charts/order-cost", saveOrderCostDailyHandler);
 router.get("/charts/order-cost", getOrderCostChartHandler);
 router.get("/costs", getOrderCosts);
 
