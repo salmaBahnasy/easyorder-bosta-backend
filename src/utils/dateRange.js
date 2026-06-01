@@ -79,6 +79,22 @@ function getEgyptMonthToDateRange(now = new Date()) {
   return { from, to };
 }
 
+/** آخر 30 يومًا بتوقيت مصر (شامل اليوم الحالي) — افتراضي لجرافات التكلفة */
+function getEgyptLast30DaysRange(now = new Date()) {
+  const egyptNow = getZonedParts(now);
+  const start = addEgyptCalendarDays(egyptNow.year, egyptNow.month, egyptNow.day, -29);
+  const from = egyptLocalToUtc(
+    start.year,
+    start.month,
+    start.day,
+    0,
+    0,
+    0,
+    0,
+  );
+  return { from, to: now };
+}
+
 /**
  * Full calendar day in Egypt for YYYY-MM-DD → UTC bounds.
  * @param {string} date - e.g. "2026-05-23"
@@ -251,6 +267,7 @@ function resolveEasyOrderDateRange(req) {
 module.exports = {
   EGYPT_TIMEZONE,
   getEgyptMonthToDateRange,
+  getEgyptLast30DaysRange,
   getEgyptDayRange,
   getEgyptCalendarDateKey,
   getEgyptTrendBucketKey,
