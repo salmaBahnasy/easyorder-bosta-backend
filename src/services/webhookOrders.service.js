@@ -2533,6 +2533,8 @@ const MAX_TREND_ROWS = 50000;
 function emptyTrendBucket() {
   return {
     totalOrders: 0,
+    shippedOrders: 0,
+    successfulOrders: 0,
     total: 0,
     totalProductUnits: 0,
     averageUnitsPerOrder: null,
@@ -2547,6 +2549,8 @@ function finalizeTrendBucket(bucket) {
     bucket.totalOrders > 0 ? bucket.total / bucket.totalOrders : null;
   return {
     totalOrders: bucket.totalOrders,
+    shippedOrders: bucket.shippedOrders || 0,
+    successfulOrders: bucket.successfulOrders || 0,
     total: bucket.total,
     totalProductUnits: bucket.totalProductUnits,
     averageUnitsPerOrder,
@@ -2817,6 +2821,8 @@ async function getOrdersStatsTimeSeries({
         if (!bucketMap.has(key)) {
           bucketMap.set(key, {
             totalOrders: 0,
+            shippedOrders: 0,
+            successfulOrders: 0,
             total: 0,
             totalProductUnits: 0,
           });
@@ -2830,6 +2836,12 @@ async function getOrdersStatsTimeSeries({
             : {};
 
         b.totalOrders += 1;
+        if (isShippedOrder(row, raw)) {
+          b.shippedOrders += 1;
+        }
+        if (isDeliveredShipping(raw)) {
+          b.successfulOrders += 1;
+        }
         b.total += pickOrderTotalCost(raw);
         b.totalProductUnits += sumLineQuantitiesFromRaw(raw, {
           productIdFilter: productIdForUnitSum,
@@ -2845,15 +2857,25 @@ async function getOrdersStatsTimeSeries({
   const points = listBucketKeys(from, to, gran).map((date) => {
     const b = bucketMap.get(date) || {
       totalOrders: 0,
+      shippedOrders: 0,
+      successfulOrders: 0,
       total: 0,
       totalProductUnits: 0,
     };
     return { date, ...finalizeTrendBucket(b) };
   });
 
-  const summaryRaw = { totalOrders: 0, total: 0, totalProductUnits: 0 };
+  const summaryRaw = {
+    totalOrders: 0,
+    shippedOrders: 0,
+    successfulOrders: 0,
+    total: 0,
+    totalProductUnits: 0,
+  };
   for (const b of bucketMap.values()) {
     summaryRaw.totalOrders += b.totalOrders;
+    summaryRaw.shippedOrders += b.shippedOrders || 0;
+    summaryRaw.successfulOrders += b.successfulOrders || 0;
     summaryRaw.total += b.total;
     summaryRaw.totalProductUnits += b.totalProductUnits;
   }
