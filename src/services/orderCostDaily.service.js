@@ -100,10 +100,37 @@ function chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap) {
 }
 
 function buildDayChartPoint(date, storedRow, ordersMap, shippedMap, deliveredMap) {
-  if (storedRow) {
-    return chartPointFromDailyRow(storedRow);
+  const live = chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap);
+  if (!storedRow) {
+    return live;
   }
-  return chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap);
+
+  const expense = Number(storedRow.expense) || 0;
+  return {
+    date,
+    expense: roundMoney(expense),
+    expenseEntered: expense > 0,
+    orders: seriesPointFromCounts(
+      expense,
+      live.orders.totalOrders,
+      live.orders.totalSales,
+    ),
+    shipped: seriesPointFromCounts(
+      expense,
+      live.shipped.totalOrders,
+      live.shipped.totalSales,
+    ),
+    delivered: seriesPointFromCounts(
+      expense,
+      live.delivered.totalOrders,
+      live.delivered.totalSales,
+    ),
+    successful: seriesPointFromCounts(
+      expense,
+      live.delivered.totalOrders,
+      live.delivered.totalSales,
+    ),
+  };
 }
 
 function aggregateDailyChartPoints(dailyPoints, bucketKey, granularity) {
@@ -276,7 +303,7 @@ async function fetchOrderCostDailyRows(from, to) {
 }
 
 /**
- * جراف: مصروفات من order_cost_daily؛ أيام بلا سجل = أعداد طلبات live + مصروف/تكلفة 0.
+ * جراف: المصروفات من order_cost_daily؛ أعداد الطلبات دائمًا live (مطابقة /stats).
  */
 async function getOrderCostChartFromStorage({
   from,
@@ -331,7 +358,7 @@ async function getOrderCostChartFromStorage({
     granularity: gran,
     dateBasis,
     formulaAr:
-      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. يوم مسجّل = مصروفات محفوظة. يوم غير مسجّل = عدد الطلبات من النظام والمصروف/التكلفة = 0.",
+      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. المصروفات من order_cost_daily؛ الأعداد live من الطلبات (Shipped = orders.status، successful = Shipped + delivered).",
     points,
     summary,
     storedDaysCount: dailyRows.length,

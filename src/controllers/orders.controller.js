@@ -22,7 +22,7 @@ const {
   resolveEasyOrderDateRange,
   getEgyptDayRange,
   getEgyptCalendarDateKey,
-  getEgyptLast30DaysRange,
+  getEgyptMonthToDateRange,
   isEasyOrderApiRequest,
   resolveSingleDayFromQueryValue,
 } = require("../utils/dateRange");
@@ -194,7 +194,7 @@ function resolveOrderCostsDateRange(req) {
   return resolveOrdersTrendDateRange(req);
 }
 
-/** افتراضي جراف التكلفة: آخر 30 يومًا (مصر) بدل بداية الشهر فقط */
+/** افتراضي جراف التكلفة: من بداية الشهر (مصر) — مطابق لـ /stats */
 function resolveOrderCostChartDateRange(req) {
   const dateParam = optionalQueryParam(req.query.date);
   if (dateParam) {
@@ -243,7 +243,7 @@ function resolveOrderCostChartDateRange(req) {
 
   if (!hasFrom && !hasTo) {
     if (isEasyOrderApiRequest(req)) {
-      return getEgyptLast30DaysRange();
+      return getEgyptMonthToDateRange();
     }
     const now = new Date();
     const from = new Date(now);

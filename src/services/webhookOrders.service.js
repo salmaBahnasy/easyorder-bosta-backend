@@ -152,6 +152,17 @@ function isShippedOrder(row, raw) {
   return false;
 }
 
+/** مطابق لـ GET /stats → stats.Shipped (عمود orders.status فقط) */
+function isStatsShippedOrder(row) {
+  return String(row?.status || "").trim() === "Shipped";
+}
+
+/** مطابق لـ stats.byShippingStatus.delivered بين الطلبات المشحونة */
+function isStatsSuccessfulOrder(row, raw) {
+  if (!isStatsShippedOrder(row)) return false;
+  return resolveEffectiveShippingStatus(raw) === "delivered";
+}
+
 function syncShippingStatusAliases(rawData) {
   if (!rawData || typeof rawData !== "object") return rawData;
   const effective = resolveEffectiveShippingStatus(rawData);
@@ -2836,10 +2847,10 @@ async function getOrdersStatsTimeSeries({
             : {};
 
         b.totalOrders += 1;
-        if (isShippedOrder(row, raw)) {
+        if (isStatsShippedOrder(row)) {
           b.shippedOrders += 1;
         }
-        if (isDeliveredShipping(raw)) {
+        if (isStatsSuccessfulOrder(row, raw)) {
           b.successfulOrders += 1;
         }
         b.total += pickOrderTotalCost(raw);
@@ -3194,6 +3205,10 @@ async function getOrderCostMetrics({
       q = q.lte("created_at", to.toISOString());
     }
 
+    q = q.order("created_at", { ascending: true }).order("order_id", {
+      ascending: true,
+    });
+
     const remaining = MAX_ORDER_COST_ROWS - rowsScanned;
     const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
     q = q.range(offset, offset + pageSize - 1);
@@ -3219,12 +3234,12 @@ async function getOrderCostMetrics({
       totalOrders += 1;
       totalSales += sales;
 
-      if (isShippedOrder(row, raw)) {
+      if (isStatsShippedOrder(row)) {
         shippedOrders += 1;
         shippedSales += sales;
       }
 
-      if (isDeliveredShipping(raw)) {
+      if (isStatsSuccessfulOrder(row, raw)) {
         deliveredOrders += 1;
         deliveredSales += sales;
       }
@@ -3373,6 +3388,10 @@ async function computeOrderCostBucketMapsForRange({
       q = q.lte("created_at", to.toISOString());
     }
 
+    q = q.order("created_at", { ascending: true }).order("order_id", {
+      ascending: true,
+    });
+
     const remaining = MAX_ORDER_COST_ROWS - rowsScanned;
     const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
     q = q.range(offset, offset + pageSize - 1);
@@ -3421,7 +3440,7 @@ async function computeOrderCostBucketMapsForRange({
       ordersBucket.totalOrders += 1;
       ordersBucket.totalSales += sales;
 
-      if (isShippedOrder(row, raw)) {
+      if (isStatsShippedOrder(row)) {
         if (!shippedMap.has(bucketDate)) {
           shippedMap.set(bucketDate, emptyOrderCostSeriesBucket());
         }
@@ -3430,7 +3449,7 @@ async function computeOrderCostBucketMapsForRange({
         shippedBucket.totalSales += sales;
       }
 
-      if (isDeliveredShipping(raw)) {
+      if (isStatsSuccessfulOrder(row, raw)) {
         if (!deliveredMap.has(bucketDate)) {
           deliveredMap.set(bucketDate, emptyOrderCostSeriesBucket());
         }
