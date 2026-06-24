@@ -154,6 +154,12 @@ function toPresentation(payload) {
     customer: {
       fullName: order.full_name,
       phone: order.phone,
+      phone2: firstNonEmptyString(
+        order.phone2,
+        order.phone_2,
+        order.secondaryPhone,
+        order.secondary_phone,
+      ) || null,
       governorate: (order.government || "").trim(),
       address: (order.address || "").trim(),
     },

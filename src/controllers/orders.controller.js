@@ -11,6 +11,7 @@ const {
   getProductSalesChart,
   getOrderCostMetrics,
   getWebhookOrderByReference,
+  getWebhookOrderById,
   ALLOWED_ORDER_STATUSES,
   ORDER_SOURCES,
   ORDER_TYPES,
@@ -36,6 +37,7 @@ const POST_ORDER_MANUAL_EXAMPLE = {
   id: "12345",
   full_name: "اسم العميل",
   phone: "01000000000",
+  phone2: "01098765432",
   address: "العنوان",
   city: "القاهرة",
   cart_items: [
@@ -697,6 +699,32 @@ async function getEasyOrderDetails(req, res) {
   try {
     const { orderId } = req.params;
 
+    let localOrder = null;
+    try {
+      localOrder = await getWebhookOrderById(orderId);
+    } catch (error) {
+      if (error.code !== "ORDER_NOT_FOUND") {
+        throw error;
+      }
+    }
+
+    if (localOrder) {
+      if (req.query.raw === "true") {
+        res.json({
+          success: true,
+          data: localOrder,
+        });
+        return;
+      }
+
+      const presented = toPresentation(localOrder);
+      res.json({
+        success: true,
+        data: presented || localOrder,
+      });
+      return;
+    }
+
     const orderDetails = await easyorderService.getOrderById(orderId);
 
     if (req.query.raw === "true") {
@@ -723,9 +751,17 @@ async function getEasyOrderDetails(req, res) {
       data: presented,
     });
   } catch (error) {
+    if (error.code === "ORDER_NOT_FOUND") {
+      res.status(404).json({
+        success: false,
+        message: "Order not found",
+        orderId: req.params.orderId,
+      });
+      return;
+    }
     res.status(error.response?.status || 500).json({
       success: false,
-      message: "Failed to fetch EasyOrders order details",
+      message: "Failed to fetch order details",
       error: error.response?.data || error.message,
     });
   }

@@ -81,7 +81,7 @@
             "header": [{ "key": "Content-Type", "value": "application/json" }],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"id\": \"manual-order-001\",\n  \"full_name\": \"Customer\",\n  \"phone\": \"01000000000\",\n  \"address\": \"Address\",\n  \"city\": \"Cairo\"\n}"
+              "raw": "{\n  \"id\": \"manual-order-001\",\n  \"full_name\": \"Customer\",\n  \"phone\": \"01000000000\",\n  \"phone2\": \"01098765432\",\n  \"address\": \"Address\",\n  \"city\": \"Cairo\"\n}"
             },
             "url": "{{baseUrl}}/api/orders",
             "auth": {

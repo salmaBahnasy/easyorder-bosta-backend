@@ -173,6 +173,37 @@ function syncShippingStatusAliases(rawData) {
   return rawData;
 }
 
+/** phone/mobile و phone2/phone_2/secondaryPhone — نفس القيمة في كل المفاتيح */
+function syncCustomerPhoneAliases(rawData) {
+  if (!rawData || typeof rawData !== "object") return rawData;
+
+  if (Object.prototype.hasOwnProperty.call(rawData, "mobile")) {
+    rawData.phone = rawData.mobile;
+  }
+  if (Object.prototype.hasOwnProperty.call(rawData, "phone")) {
+    rawData.mobile = rawData.phone;
+  }
+
+  for (const key of [
+    "phone2",
+    "phone_2",
+    "secondaryPhone",
+    "secondary_phone",
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(rawData, key)) continue;
+    const s = String(rawData[key] ?? "").trim();
+    if (s) {
+      rawData.phone2 = s;
+      rawData.phone_2 = s;
+      rawData.secondaryPhone = s;
+      rawData.secondary_phone = s;
+    }
+    break;
+  }
+
+  return rawData;
+}
+
 const ORDER_STATUS_OPTIONS = [
   { value: "new", labelAr: "جديد" },
   { value: "Confirmed", labelAr: "مؤكد" },
@@ -874,6 +905,7 @@ function mapStoredOrderToClient(row) {
       ? { ...row.raw_data }
       : {};
   syncShippingStatusAliases(raw);
+  syncCustomerPhoneAliases(raw);
   return {
     ...raw,
     sourceOrderId: row.order_id,
@@ -944,6 +976,22 @@ async function getWebhookOrderByReference(orderReferenceInput) {
   return mapStoredOrderToClient(rows[0]);
 }
 
+async function getWebhookOrderById(orderId) {
+  const id = String(orderId || "").trim();
+  if (!id) {
+    const err = new Error("order id is required");
+    err.code = "INVALID_ORDER_ID";
+    throw err;
+  }
+  const row = await fetchOrderRowBySourceId(id);
+  if (!row) {
+    const notFound = new Error("Order not found");
+    notFound.code = "ORDER_NOT_FOUND";
+    throw notFound;
+  }
+  return mapStoredOrderToClient(row);
+}
+
 async function addWebhookOrder(order, options = {}) {
   const { fromWebhook, actor } = options;
   const sourceOrderId = resolveSourceOrderId(order);
@@ -957,6 +1005,7 @@ async function addWebhookOrder(order, options = {}) {
 
   raw_data.orderSource = raw_data.order_source;
   raw_data.orderType = raw_data.order_type;
+  syncCustomerPhoneAliases(raw_data);
   syncShippingStatusAliases(raw_data);
 
   if (actor?.id != null) {
@@ -1241,7 +1290,14 @@ async function getWebhookOrders({
   let phoneOrderIds = null;
   if (pPhone) {
     phoneOrderIds = await collectOrderIdsUnionIlikePaths({
-      paths: ["raw_data->>phone", "raw_data->>mobile"],
+      paths: [
+        "raw_data->>phone",
+        "raw_data->>mobile",
+        "raw_data->>phone2",
+        "raw_data->>phone_2",
+        "raw_data->>secondaryPhone",
+        "raw_data->>secondary_phone",
+      ],
       ilikePattern: pPhone,
       applyBaseFilters: applyBaseListFilters,
     });
@@ -1468,6 +1524,24 @@ async function editOrder(orderId, updates, actor) {
   ) {
     normalizedIncomingUpdates.mobile = normalizedIncomingUpdates.phone;
   }
+  for (const key of [
+    "phone2",
+    "phone_2",
+    "secondaryPhone",
+    "secondary_phone",
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(normalizedIncomingUpdates, key)) {
+      continue;
+    }
+    const s = String(normalizedIncomingUpdates[key] ?? "").trim();
+    if (s) {
+      normalizedIncomingUpdates.phone2 = s;
+      normalizedIncomingUpdates.phone_2 = s;
+      normalizedIncomingUpdates.secondaryPhone = s;
+      normalizedIncomingUpdates.secondary_phone = s;
+    }
+    break;
+  }
   if (
     Object.prototype.hasOwnProperty.call(
       normalizedIncomingUpdates,
@@ -1548,6 +1622,7 @@ async function editOrder(orderId, updates, actor) {
     ...(existingOrder.raw_data || {}),
     ...normalizedIncomingUpdates,
   };
+  syncCustomerPhoneAliases(mergedRawData);
   syncShippingStatusAliases(mergedRawData);
 
   if (changedBy) {
@@ -3596,6 +3671,7 @@ module.exports = {
   addWebhookOrder,
   getWebhookOrders,
   getWebhookOrderByReference,
+  getWebhookOrderById,
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,
