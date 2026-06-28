@@ -40,24 +40,28 @@ function normalizeFulfillmentApiKey(apiKey) {
   return trimmed.replace(/^bearer\s+/i, "").trim();
 }
 
-function fulfillmentHeaders() {
+function isFulfillmentApiKey(apiKey) {
+  return /^boost_/i.test(normalizeFulfillmentApiKey(apiKey));
+}
+
+function resolveFulfillmentApiKey() {
   const fulfillmentKey = normalizeFulfillmentApiKey(
     process.env.BOSTA_FULFILLMENT_API_KEY,
   );
+  if (fulfillmentKey) return fulfillmentKey;
+
   const shippingKey = normalizeFulfillmentApiKey(bosta.apiKey);
-  const key = fulfillmentKey || shippingKey;
+  if (isFulfillmentApiKey(shippingKey)) return shippingKey;
+
+  return "";
+}
+
+function fulfillmentHeaders() {
+  const key = resolveFulfillmentApiKey();
 
   if (!key) {
     const err = new Error(
-      "BOSTA_FULFILLMENT_API_KEY is required for send-to-bosta",
-    );
-    err.code = "BOSTA_API_KEY_MISSING";
-    throw err;
-  }
-
-  if (!fulfillmentKey && shippingKey) {
-    const err = new Error(
-      "BOSTA_FULFILLMENT_API_KEY is required — BOSTA_API_KEY is for shipping only, not fulfillment",
+      "Set BOSTA_FULFILLMENT_API_KEY (boost_...) for send-to-bosta",
     );
     err.code = "BOSTA_FULFILLMENT_API_KEY_MISSING";
     throw err;
