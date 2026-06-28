@@ -3,6 +3,8 @@ const {
   createFulfillmentOrder,
   createFulfillmentOrdersBulk,
   getWebhookUrl,
+  fetchBostaInventoryAvailabilityMap,
+  getFulfillmentKeyDiagnostics,
 } = require("../services/bostaFulfillment.service");
 const {
   getWebhookOrderById,
@@ -304,8 +306,41 @@ async function handleBostaOrderStatusWebhook(req, res) {
   }
 }
 
+/**
+ * GET /api/easyorder/bosta/fulfillment/health
+ * Quick check: is Bosta x-api-key configured correctly on this server?
+ */
+async function checkBostaFulfillmentHealth(req, res) {
+  const keyInfo = getFulfillmentKeyDiagnostics();
+
+  try {
+    const inventory = await fetchBostaInventoryAvailabilityMap();
+    res.json({
+      success: true,
+      message: "Bosta fulfillment API connected",
+      key: keyInfo,
+      inventorySkuCount: inventory.size,
+    });
+  } catch (error) {
+    res.status(error.status === 401 ? 401 : 502).json({
+      success: false,
+      message: error.message,
+      code: error.code || "BOSTA_HEALTH_CHECK_FAILED",
+      key: keyInfo,
+      hint:
+        keyInfo.looksLikeEasyOrderKey
+          ? "BOSTA_FULFILLMENT_API_KEY looks like EasyOrder Api-Key — use boost_... from Bosta Fulfillment"
+          : !keyInfo.looksLikeBoostKey
+            ? "Set BOSTA_FULFILLMENT_API_KEY=boost_... (same as Postman x-api-key header)"
+            : "Key format OK but Bosta rejected it — copy exact x-api-key from Postman to Render env",
+      details: error.details || null,
+    });
+  }
+}
+
 module.exports = {
   sendOrderToBosta,
   sendOrdersToBostaBulk,
   handleBostaOrderStatusWebhook,
+  checkBostaFulfillmentHealth,
 };

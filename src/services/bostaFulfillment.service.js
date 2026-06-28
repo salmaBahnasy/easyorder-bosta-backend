@@ -169,7 +169,8 @@ async function buildBostaItemsFromOrder(localOrder, overrides = {}) {
     ];
   }
 
-  const { items: resolvedItems } = await validateOrderLinesInventory(localOrder);
+  const { items: resolvedItems } =
+    await validateOrderLinesInventory(localOrder);
 
   return resolvedItems.map((resolved, index) => {
     const line = cartLines[resolved.lineIndex ?? index];
@@ -451,6 +452,28 @@ async function fetchBostaInventoryAvailabilityMap() {
   return availability;
 }
 
+function getFulfillmentKeyDiagnostics() {
+  const fulfillmentEnv = normalizeFulfillmentApiKey(
+    process.env.BOSTA_FULFILLMENT_API_KEY,
+  );
+  const bostaApiEnv = normalizeFulfillmentApiKey(bosta.apiKey);
+  const resolved = resolveFulfillmentApiKey();
+
+  let resolvedSource = "none";
+  if (fulfillmentEnv) resolvedSource = "BOSTA_FULFILLMENT_API_KEY";
+  else if (isFulfillmentApiKey(bostaApiEnv)) resolvedSource = "BOSTA_API_KEY";
+
+  return {
+    hasFulfillmentEnv: Boolean(fulfillmentEnv),
+    hasBostaApiKeyEnv: Boolean(bostaApiEnv),
+    resolvedSource,
+    keyPrefix: resolved ? `${resolved.slice(0, 8)}...` : null,
+    keyLength: resolved ? resolved.length : 0,
+    looksLikeBoostKey: isFulfillmentApiKey(resolved),
+    looksLikeEasyOrderKey: /^[0-9a-f-]{36}$/i.test(resolved),
+  };
+}
+
 module.exports = {
   PLATFORM,
   DEFAULT_ORDER_TYPE,
@@ -461,4 +484,5 @@ module.exports = {
   createFulfillmentOrdersBulk,
   fetchBostaInventoryAvailabilityMap,
   getFulfillment,
+  getFulfillmentKeyDiagnostics,
 };

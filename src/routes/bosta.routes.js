@@ -15,9 +15,13 @@ const {
   deleteUnmappedProductHandler,
   importBostaSkuMappingsHandler,
 } = require("../controllers/bostaSkuMappings.controller");
+const { checkBostaFulfillmentHealth } = require("../controllers/bostaFulfillment.controller");
 const { requireAuth } = require("../middlewares/auth.middleware");
 
 const router = express.Router();
+
+/** Test Bosta x-api-key on this server (Render vs local). */
+router.get("/fulfillment/health", checkBostaFulfillmentHealth);
 
 /** SKU mappings: product / variant / size → Bosta sku codes */
 router.get("/sku-mappings", listBostaSkuMappings);
