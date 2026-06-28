@@ -33,7 +33,26 @@ async function getProductsFromEasyOrder() {
   return response.data;
 }
 
+/** GET /products/:product_id — single product from EasyOrders external-apps API. */
+async function getProductById(productId) {
+  const id = String(productId || "").trim();
+  if (!id) {
+    const err = new Error("product_id is required");
+    err.code = "INVALID_PRODUCT_ID";
+    throw err;
+  }
+
+  const url = `${EASYORDER_API_BASE}/products/${encodeURIComponent(id)}`;
+
+  const response = await axios.get(url, {
+    headers: await easyorderHeaders(),
+  });
+
+  return response.data;
+}
+
 module.exports = {
   getOrderById,
   getProductsFromEasyOrder,
+  getProductById,
 };

@@ -128,9 +128,7 @@ function toPresentation(payload) {
   if (!order || !order.id) return null;
 
   const cartLines = order.cart_items ?? order.cartItems;
-  const lineItems = formatLineItems(
-    Array.isArray(cartLines) ? cartLines : [],
-  );
+  const lineItems = formatLineItems(Array.isArray(cartLines) ? cartLines : []);
 
   const orderSource = firstNonEmptyString(
     payload.order_source,
@@ -154,12 +152,13 @@ function toPresentation(payload) {
     customer: {
       fullName: order.full_name,
       phone: order.phone,
-      phone2: firstNonEmptyString(
-        order.phone2,
-        order.phone_2,
-        order.secondaryPhone,
-        order.secondary_phone,
-      ) || null,
+      phone2:
+        firstNonEmptyString(
+          order.phone2,
+          order.phone_2,
+          order.secondaryPhone,
+          order.secondary_phone,
+        ) || null,
       governorate: (order.government || "").trim(),
       address: (order.address || "").trim(),
     },

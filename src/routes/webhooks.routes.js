@@ -6,8 +6,13 @@ const {
   getWebhookOrders,
 } = require("../services/webhookOrders.service");
 const {
+  handleBostaOrderStatusWebhook,
+} = require("../controllers/bostaFulfillment.controller");
+const {
   toPresentation,
 } = require("../services/easyorderPresentation.service");
+
+router.post("/bosta/order-status", handleBostaOrderStatusWebhook);
 
 router.post("/easyorders/order-created", async (req, res) => {
   try {

@@ -992,6 +992,175 @@ async function getWebhookOrderById(orderId) {
   return mapStoredOrderToClient(row);
 }
 
+async function findOrderByBostaAlias(orderAlias) {
+  const alias = String(orderAlias || "").trim();
+  if (!alias) {
+    const err = new Error("orderAlias is required");
+    err.code = "INVALID_ORDER_ALIAS";
+    throw err;
+  }
+
+  const byIdRow = await fetchOrderRowBySourceId(alias);
+  if (byIdRow) {
+    return mapStoredOrderToClient(byIdRow);
+  }
+
+  if (/^\d+$/.test(alias)) {
+    try {
+      return await getWebhookOrderByReference(alias);
+    } catch (error) {
+      if (
+        error.code !== "ORDER_NOT_FOUND" &&
+        error.code !== "ORDER_REFERENCE_AMBIGUOUS"
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  const escaped = alias.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const { data: rows, error } = await supabase
+    .from(ORDERS_TABLE)
+    .select("*")
+    .or(
+      [
+        `raw_data->>bosta_order_alias.eq.${escaped}`,
+        `raw_data->>orderAlias.eq.${escaped}`,
+      ].join(","),
+    )
+    .limit(2);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!rows?.length) {
+    const notFound = new Error("Order not found");
+    notFound.code = "ORDER_NOT_FOUND";
+    throw notFound;
+  }
+  if (rows.length > 1) {
+    const ambiguous = new Error("Multiple orders match this orderAlias");
+    ambiguous.code = "ORDER_REFERENCE_AMBIGUOUS";
+    throw ambiguous;
+  }
+
+  return mapStoredOrderToClient(rows[0]);
+}
+
+async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
+  const id = String(orderId || "").trim();
+  if (!id) {
+    const err = new Error("order id is required");
+    err.code = "INVALID_ORDER_ID";
+    throw err;
+  }
+
+  const { data: existingOrder, error: existingError } = await supabase
+    .from(ORDERS_TABLE)
+    .select("order_id,status,raw_data,created_at")
+    .eq("order_id", id)
+    .single();
+
+  if (existingError || !existingOrder) {
+    const notFound = new Error("Order not found");
+    notFound.code = "ORDER_NOT_FOUND";
+    throw notFound;
+  }
+
+  const mergedRawData = {
+    ...(existingOrder.raw_data || {}),
+    ...(rawPatch || {}),
+  };
+  syncCustomerPhoneAliases(mergedRawData);
+  syncShippingStatusAliases(mergedRawData);
+
+  let nextStatus = existingOrder.status;
+  if (options.status && ALLOWED_ORDER_STATUSES.includes(options.status)) {
+    nextStatus = options.status;
+  }
+
+  const { data, error } = await supabase
+    .from(ORDERS_TABLE)
+    .update({
+      raw_data: mergedRawData,
+      status: nextStatus,
+    })
+    .eq("order_id", id)
+    .select()
+    .single();
+
+  if (error || !data) {
+    throw new Error(error?.message || "Failed to update order");
+  }
+
+  return mapStoredOrderToClient(data);
+}
+
+async function markOrderSentToBosta(orderId, bostaResult, bostaPayload) {
+  const bostaId =
+    bostaResult?.id ??
+    bostaResult?.data?.id ??
+    bostaResult?.orderId ??
+    null;
+
+  return mergeOrderRawDataPatch(
+    orderId,
+    {
+      bosta_fulfillment_id: bostaId,
+      bosta_order_id: bostaId,
+      bosta_order_alias: bostaPayload?.orderAlias ?? null,
+      bosta_sent_at: new Date().toISOString(),
+      bosta_last_payload: bostaPayload ?? null,
+      shipping_status: "in_progress",
+      shippingStatus: "in_progress",
+    },
+    { status: "Shipped" },
+  );
+}
+
+function mapBostaStatusToShippingStatus(status) {
+  const key = String(status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+
+  if (
+    key.includes("deliver") ||
+    key === "completed" ||
+    key === "success" ||
+    key === "successful"
+  ) {
+    return "delivered";
+  }
+
+  if (
+    key.includes("fail") ||
+    key.includes("cancel") ||
+    key.includes("return") ||
+    key.includes("reject")
+  ) {
+    return "failed";
+  }
+
+  return "in_progress";
+}
+
+async function applyBostaFulfillmentWebhook(payload) {
+  const order = await findOrderByBostaAlias(payload?.orderAlias);
+  const shippingStatus = mapBostaStatusToShippingStatus(payload?.status);
+
+  return mergeOrderRawDataPatch(order.sourceOrderId, {
+    bosta_order_id: payload?.id ?? null,
+    bosta_status: payload?.status ?? null,
+    bosta_tracking_number: payload?.trackingNumber ?? null,
+    bosta_type: payload?.type ?? null,
+    bosta_failure_reason: payload?.reason ?? null,
+    bosta_last_webhook_at: new Date().toISOString(),
+    shipping_status: shippingStatus,
+    shippingStatus,
+  });
+}
+
 async function addWebhookOrder(order, options = {}) {
   const { fromWebhook, actor } = options;
   const sourceOrderId = resolveSourceOrderId(order);
@@ -3672,6 +3841,9 @@ module.exports = {
   getWebhookOrders,
   getWebhookOrderByReference,
   getWebhookOrderById,
+  findOrderByBostaAlias,
+  markOrderSentToBosta,
+  applyBostaFulfillmentWebhook,
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,

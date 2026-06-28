@@ -1,4 +1,3 @@
-const bostaService = require("../services/bosta.service");
 const easyorderService = require("../services/easyorder.service");
 const {
   addWebhookOrder,
@@ -275,7 +274,9 @@ async function getOrders(req, res) {
     }
 
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-      res.status(400).json({ success: false, message: "Invalid from or to date" });
+      res
+        .status(400)
+        .json({ success: false, message: "Invalid from or to date" });
       return;
     }
 
@@ -767,29 +768,6 @@ async function getEasyOrderDetails(req, res) {
   }
 }
 
-// ـ--------------------
-async function sendOrderToBosta(req, res) {
-  try {
-    const { orderId } = req.params;
-
-    const order = await easyorderService.getOrderById(orderId);
-
-    const shipment = await bostaService.createShipment(order);
-
-    res.json({
-      success: true,
-      message: "Order sent to Bosta successfully",
-      data: shipment,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to send order to Bosta",
-      error: error.message,
-    });
-  }
-}
-
 function normalizeQueryId(value) {
   if (value == null) return null;
   const raw = Array.isArray(value) ? value[0] : value;
@@ -1167,8 +1145,7 @@ async function getOrdersAnalytics(req, res) {
       meta: {
         truncated: report.truncated,
         maxRowsCap: report.maxRowsCap,
-        note:
-          "Bucket key __unset is used when a value is missing in raw_data or status.",
+        note: "Bucket key __unset is used when a value is missing in raw_data or status.",
       },
     });
   } catch (error) {
@@ -1249,8 +1226,7 @@ async function getProductSalesChartHandler(req, res) {
  */
 async function getOrderCosts(req, res) {
   try {
-    const expenseRaw =
-      req.query.expense ?? req.query.spent ?? req.query.spend;
+    const expenseRaw = req.query.expense ?? req.query.spent ?? req.query.spend;
 
     if (
       expenseRaw != null &&
@@ -1283,8 +1259,7 @@ async function getOrderCosts(req, res) {
     const dateBasisRaw = optionalQueryParam(
       req.query.date_basis || req.query.dateBasis,
     );
-    const dateBasis =
-      dateBasisRaw === "activity" ? "activity" : "created";
+    const dateBasis = dateBasisRaw === "activity" ? "activity" : "created";
 
     const metrics = await getOrderCostMetrics({
       expense: expenseRaw,
@@ -1330,8 +1305,7 @@ async function getOrderCosts(req, res) {
  */
 async function saveOrderCostDailyHandler(req, res) {
   try {
-    const dateRaw =
-      req.body?.date ?? req.query.date ?? req.body?.cost_date;
+    const dateRaw = req.body?.date ?? req.query.date ?? req.body?.cost_date;
     const expenseRaw =
       req.body?.expense ??
       req.query.expense ??
@@ -1341,7 +1315,7 @@ async function saveOrderCostDailyHandler(req, res) {
     if (dateRaw == null || String(dateRaw).trim() === "") {
       res.status(400).json({
         success: false,
-        message: 'date is required (YYYY-MM-DD)',
+        message: "date is required (YYYY-MM-DD)",
       });
       return;
     }
@@ -1369,8 +1343,7 @@ async function saveOrderCostDailyHandler(req, res) {
         req.query.date_basis ||
         req.query.dateBasis,
     );
-    const dateBasis =
-      dateBasisRaw === "activity" ? "activity" : "created";
+    const dateBasis = dateBasisRaw === "activity" ? "activity" : "created";
 
     const result = await saveOrderCostDailyEntry({
       date: dateRaw,
@@ -1385,10 +1358,7 @@ async function saveOrderCostDailyHandler(req, res) {
       chartPoint: result.chartPoint,
     });
   } catch (error) {
-    if (
-      error.code === "INVALID_DATE" ||
-      error.code === "INVALID_EXPENSE"
-    ) {
+    if (error.code === "INVALID_DATE" || error.code === "INVALID_EXPENSE") {
       res.status(400).json({ success: false, message: error.message });
       return;
     }
@@ -1413,8 +1383,7 @@ async function getOrderCostChartHandler(req, res) {
     const dateBasisRaw = optionalQueryParam(
       req.query.date_basis || req.query.dateBasis,
     );
-    const dateBasis =
-      dateBasisRaw === "activity" ? "activity" : "created";
+    const dateBasis = dateBasisRaw === "activity" ? "activity" : "created";
 
     let from;
     let to;
@@ -1470,7 +1439,6 @@ module.exports = {
   getOrders,
   getOrderByReference,
   changeOrderStatus,
-  sendOrderToBosta,
   getEasyOrderDetails,
   getOrdersStats,
   getOrdersStatsTrend,

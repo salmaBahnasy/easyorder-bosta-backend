@@ -6,8 +6,27 @@ const {
   listDistricts,
   listZones,
 } = require("../controllers/bostaLocations.controller");
+const {
+  listBostaSkuMappings,
+  getBostaSkuMappingHandler,
+  addBostaSkuMappingHandler,
+  updateBostaSkuMappingHandler,
+  importBostaSkuMappingsHandler,
+} = require("../controllers/bostaSkuMappings.controller");
+const { requireAuth } = require("../middlewares/auth.middleware");
 
 const router = express.Router();
+
+/** SKU mappings: product / variant / size → Bosta sku codes */
+router.get("/sku-mappings", listBostaSkuMappings);
+router.get("/sku-mappings/:mappingType/:entityId", getBostaSkuMappingHandler);
+router.post("/sku-mappings/import", requireAuth, importBostaSkuMappingsHandler);
+router.post("/sku-mappings", requireAuth, addBostaSkuMappingHandler);
+router.patch(
+  "/sku-mappings/:mappingType/:entityId",
+  requireAuth,
+  updateBostaSkuMappingHandler,
+);
 
 /** Pull cities + districts from Bosta API v2 and upsert into Supabase (same Bosta ids). */
 router.post("/locations/sync", syncLocations);
