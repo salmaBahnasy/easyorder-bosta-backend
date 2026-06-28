@@ -34,16 +34,17 @@ function getWebhookUrl() {
   return `${base}/webhooks/bosta/order-status`;
 }
 
-function buildFulfillmentAuthHeader(apiKey) {
+function normalizeFulfillmentApiKey(apiKey) {
   const trimmed = String(apiKey || "").trim();
   if (!trimmed) return "";
-  if (/^bearer\s+/i.test(trimmed)) return trimmed;
-  return `Bearer ${trimmed}`;
+  return trimmed.replace(/^bearer\s+/i, "").trim();
 }
 
 function fulfillmentHeaders() {
-  const fulfillmentKey = (process.env.BOSTA_FULFILLMENT_API_KEY || "").trim();
-  const shippingKey = (bosta.apiKey || "").trim();
+  const fulfillmentKey = normalizeFulfillmentApiKey(
+    process.env.BOSTA_FULFILLMENT_API_KEY,
+  );
+  const shippingKey = normalizeFulfillmentApiKey(bosta.apiKey);
   const key = fulfillmentKey || shippingKey;
 
   if (!key) {
@@ -63,7 +64,7 @@ function fulfillmentHeaders() {
   }
 
   return {
-    Authorization: buildFulfillmentAuthHeader(key),
+    "x-api-key": key,
     "Content-Type": "application/json",
     Accept: "application/json",
   };
