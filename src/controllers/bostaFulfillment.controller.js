@@ -103,7 +103,8 @@ async function sendOrderToBosta(req, res) {
     if (
       error.code === "BOSTA_ORDER_MAPPING_ERROR" ||
       error.code === "BOSTA_WEBHOOK_URL_MISSING" ||
-      error.code === "BOSTA_API_KEY_MISSING"
+      error.code === "BOSTA_API_KEY_MISSING" ||
+      error.code === "BOSTA_FULFILLMENT_API_KEY_MISSING"
     ) {
       res.status(400).json({
         success: false,
@@ -228,7 +229,8 @@ async function sendOrdersToBostaBulk(req, res) {
     }
     if (
       error.code === "BOSTA_WEBHOOK_URL_MISSING" ||
-      error.code === "BOSTA_API_KEY_MISSING"
+      error.code === "BOSTA_API_KEY_MISSING" ||
+      error.code === "BOSTA_FULFILLMENT_API_KEY_MISSING"
     ) {
       res.status(400).json({
         success: false,

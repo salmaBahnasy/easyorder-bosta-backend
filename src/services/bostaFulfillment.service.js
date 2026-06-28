@@ -34,23 +34,36 @@ function getWebhookUrl() {
   return `${base}/webhooks/bosta/order-status`;
 }
 
+function buildFulfillmentAuthHeader(apiKey) {
+  const trimmed = String(apiKey || "").trim();
+  if (!trimmed) return "";
+  if (/^bearer\s+/i.test(trimmed)) return trimmed;
+  return `Bearer ${trimmed}`;
+}
+
 function fulfillmentHeaders() {
-  const key = (
-    process.env.BOSTA_FULFILLMENT_API_KEY ||
-    bosta.apiKey ||
-    ""
-  ).trim();
+  const fulfillmentKey = (process.env.BOSTA_FULFILLMENT_API_KEY || "").trim();
+  const shippingKey = (bosta.apiKey || "").trim();
+  const key = fulfillmentKey || shippingKey;
 
   if (!key) {
     const err = new Error(
-      "BOSTA_API_KEY or BOSTA_FULFILLMENT_API_KEY is required",
+      "BOSTA_FULFILLMENT_API_KEY is required for send-to-bosta",
     );
     err.code = "BOSTA_API_KEY_MISSING";
     throw err;
   }
 
+  if (!fulfillmentKey && shippingKey) {
+    const err = new Error(
+      "BOSTA_FULFILLMENT_API_KEY is required — BOSTA_API_KEY is for shipping only, not fulfillment",
+    );
+    err.code = "BOSTA_FULFILLMENT_API_KEY_MISSING";
+    throw err;
+  }
+
   return {
-    Authorization: key,
+    Authorization: buildFulfillmentAuthHeader(key),
     "Content-Type": "application/json",
     Accept: "application/json",
   };
@@ -317,6 +330,19 @@ function mapBostaStatusToShippingStatus(status) {
   return "in_progress";
 }
 
+function pickBostaApiErrorMessage(data, fallback) {
+  if (!data || typeof data !== "object") return fallback;
+  const fromMessages = Array.isArray(data.messages)
+    ? data.messages.find((m) => m != null && String(m).trim())
+    : null;
+  return (
+    data.message ||
+    data.error ||
+    (fromMessages != null ? String(fromMessages) : "") ||
+    fallback
+  );
+}
+
 async function postFulfillment(path, body) {
   const url = `${getFulfillmentBaseUrl()}${path}`;
   const response = await axios.post(url, body, {
@@ -327,9 +353,10 @@ async function postFulfillment(path, body) {
 
   if (response.status >= 400) {
     const err = new Error(
-      response.data?.message ||
-        response.data?.error ||
+      pickBostaApiErrorMessage(
+        response.data,
         `Bosta fulfillment API returned ${response.status}`,
+      ),
     );
     err.code = "BOSTA_API_ERROR";
     err.status = response.status;
@@ -359,9 +386,10 @@ async function getFulfillment(path, params = {}) {
 
   if (response.status >= 400) {
     const err = new Error(
-      response.data?.message ||
-        response.data?.error ||
+      pickBostaApiErrorMessage(
+        response.data,
         `Bosta fulfillment API returned ${response.status}`,
+      ),
     );
     err.code = "BOSTA_API_ERROR";
     err.status = response.status;
