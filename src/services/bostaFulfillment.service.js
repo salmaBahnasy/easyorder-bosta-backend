@@ -35,9 +35,16 @@ function getWebhookUrl() {
 }
 
 function normalizeFulfillmentApiKey(apiKey) {
-  const trimmed = String(apiKey || "").trim();
+  let trimmed = String(apiKey || "").trim();
   if (!trimmed) return "";
-  return trimmed.replace(/^bearer\s+/i, "").trim();
+  trimmed = trimmed.replace(/^bearer\s+/i, "").trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    trimmed = trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
 }
 
 function isFulfillmentApiKey(apiKey) {
