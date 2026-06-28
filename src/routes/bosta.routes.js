@@ -11,6 +11,8 @@ const {
   getBostaSkuMappingHandler,
   addBostaSkuMappingHandler,
   updateBostaSkuMappingHandler,
+  deleteBostaSkuMappingHandler,
+  deleteUnmappedProductHandler,
   importBostaSkuMappingsHandler,
 } = require("../controllers/bostaSkuMappings.controller");
 const { requireAuth } = require("../middlewares/auth.middleware");
@@ -19,13 +21,28 @@ const router = express.Router();
 
 /** SKU mappings: product / variant / size → Bosta sku codes */
 router.get("/sku-mappings", listBostaSkuMappings);
-router.get("/sku-mappings/:mappingType/:entityId", getBostaSkuMappingHandler);
 router.post("/sku-mappings/import", requireAuth, importBostaSkuMappingsHandler);
 router.post("/sku-mappings", requireAuth, addBostaSkuMappingHandler);
+router.delete(
+  "/sku-mappings/unmapped/:productId",
+  requireAuth,
+  deleteUnmappedProductHandler,
+);
+router.get("/sku-mappings/:mappingType/:entityId", getBostaSkuMappingHandler);
+router.put(
+  "/sku-mappings/:mappingType/:entityId",
+  requireAuth,
+  updateBostaSkuMappingHandler,
+);
 router.patch(
   "/sku-mappings/:mappingType/:entityId",
   requireAuth,
   updateBostaSkuMappingHandler,
+);
+router.delete(
+  "/sku-mappings/:mappingType/:entityId",
+  requireAuth,
+  deleteBostaSkuMappingHandler,
 );
 
 /** Pull cities + districts from Bosta API v2 and upsert into Supabase (same Bosta ids). */

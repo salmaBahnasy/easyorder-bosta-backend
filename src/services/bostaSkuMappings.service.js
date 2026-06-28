@@ -301,6 +301,67 @@ async function updateBostaSkuMapping(mappingType, entityId, input) {
   return data;
 }
 
+async function deleteBostaSkuMapping(mappingType, entityId) {
+  const type = String(mappingType || "").trim();
+  const id = String(entityId || "").trim();
+
+  if (!MAPPING_TYPES.includes(type)) {
+    const err = new Error('mappingType must be "product", "variant", or "size"');
+    err.code = "INVALID_MAPPING_TYPE";
+    throw err;
+  }
+  if (!id) {
+    const err = new Error("entityId is required");
+    err.code = "INVALID_ENTITY_ID";
+    throw err;
+  }
+
+  await getBostaSkuMapping(type, id);
+
+  const { error } = await supabase
+    .from(MAPPINGS_TABLE)
+    .delete()
+    .eq("mapping_type", type)
+    .eq("entity_id", id);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return { mappingType: type, entityId: id, deleted: true };
+}
+
+async function deleteUnmappedProduct(productId) {
+  const id = String(productId || "").trim();
+  if (!id) {
+    const err = new Error("productId is required");
+    err.code = "INVALID_ENTITY_ID";
+    throw err;
+  }
+
+  const { data, error } = await supabase
+    .from(UNMAPPED_TABLE)
+    .delete()
+    .eq("product_id", id)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!data) {
+    const err = new Error("Unmapped product not found");
+    err.code = "MAPPING_NOT_FOUND";
+    throw err;
+  }
+
+  return {
+    productId: data.product_id,
+    name: data.name,
+    deleted: true,
+  };
+}
+
 async function replaceUnmappedProducts(unmappedProducts) {
   await supabase.from(UNMAPPED_TABLE).delete().neq("product_id", "");
 
@@ -327,6 +388,17 @@ async function replaceUnmappedProducts(unmappedProducts) {
   }
 
   return data || [];
+}
+
+async function replaceAllMappingRows() {
+  const { error } = await supabase
+    .from(MAPPINGS_TABLE)
+    .delete()
+    .neq("entity_id", "");
+
+  if (error) {
+    throw new Error(error.message);
+  }
 }
 
 async function importBostaSkuMappings(payload) {
@@ -376,10 +448,10 @@ async function importBostaSkuMappings(payload) {
     });
   }
 
+  await replaceAllMappingRows();
+
   if (rows.length) {
-    const { error } = await supabase
-      .from(MAPPINGS_TABLE)
-      .upsert(rows, { onConflict: "mapping_type,entity_id" });
+    const { error } = await supabase.from(MAPPINGS_TABLE).insert(rows);
 
     if (error) {
       throw new Error(error.message);
@@ -689,6 +761,8 @@ module.exports = {
   getBostaSkuMapping,
   addBostaSkuMapping,
   updateBostaSkuMapping,
+  deleteBostaSkuMapping,
+  deleteUnmappedProduct,
   importBostaSkuMappings,
   resolveMappedSkuCandidatesForLine,
   resolveMappedBostaSkuForLine,

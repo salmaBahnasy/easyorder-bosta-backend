@@ -4,6 +4,8 @@ const {
   getBostaSkuMapping,
   addBostaSkuMapping,
   updateBostaSkuMapping,
+  deleteBostaSkuMapping,
+  deleteUnmappedProduct,
   importBostaSkuMappings,
 } = require("../services/bostaSkuMappings.service");
 
@@ -139,6 +141,61 @@ async function updateBostaSkuMappingHandler(req, res) {
   }
 }
 
+async function deleteBostaSkuMappingHandler(req, res) {
+  try {
+    const { mappingType, entityId } = req.params;
+    const result = await deleteBostaSkuMapping(mappingType, entityId);
+    res.json({
+      success: true,
+      message: "Bosta SKU mapping deleted",
+      data: result,
+    });
+  } catch (error) {
+    if (
+      error.code === "INVALID_MAPPING_TYPE" ||
+      error.code === "INVALID_ENTITY_ID"
+    ) {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error.code === "MAPPING_NOT_FOUND") {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete Bosta SKU mapping",
+      error: error.message,
+    });
+  }
+}
+
+async function deleteUnmappedProductHandler(req, res) {
+  try {
+    const productId = req.params.productId ?? req.params.entityId;
+    const result = await deleteUnmappedProduct(productId);
+    res.json({
+      success: true,
+      message: "Unmapped product removed",
+      data: result,
+    });
+  } catch (error) {
+    if (error.code === "INVALID_ENTITY_ID") {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (error.code === "MAPPING_NOT_FOUND") {
+      res.status(404).json({ success: false, message: error.message });
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to delete unmapped product",
+      error: error.message,
+    });
+  }
+}
+
 async function importBostaSkuMappingsHandler(req, res) {
   try {
     const data = await importBostaSkuMappings(req.body || {});
@@ -162,5 +219,7 @@ module.exports = {
   getBostaSkuMappingHandler,
   addBostaSkuMappingHandler,
   updateBostaSkuMappingHandler,
+  deleteBostaSkuMappingHandler,
+  deleteUnmappedProductHandler,
   importBostaSkuMappingsHandler,
 };
