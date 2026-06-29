@@ -755,6 +755,190 @@ async function validateOrderLinesInventory(localOrder) {
   return { items, inventoryMap, maps };
 }
 
+function buildSkusWithInventory(skus, inventoryMap, requiredQuantity = 1) {
+  const qtyNeeded = Math.max(1, Number(requiredQuantity) || 1);
+  return normalizeSkus(skus).map((skuCode) => {
+    const availableQuantity = Number(inventoryMap.get(skuCode) || 0);
+    return {
+      skuCode,
+      availableQuantity,
+      inStock: availableQuantity >= qtyNeeded,
+    };
+  });
+}
+
+function pickRecommendedSku(skusWithInventory, requiredQuantity = 1) {
+  const qtyNeeded = Math.max(1, Number(requiredQuantity) || 1);
+  for (const item of skusWithInventory) {
+    if (item.availableQuantity >= qtyNeeded) {
+      return item;
+    }
+  }
+  return null;
+}
+
+function buildOptionBase(row, inventoryMap, requiredQuantity, extra = {}) {
+  const skus = buildSkusWithInventory(row.skus, inventoryMap, requiredQuantity);
+  const recommended = pickRecommendedSku(skus, requiredQuantity);
+  return {
+    mappingType: row.mapping_type,
+    entityId: row.entity_id,
+    productId: row.product_id || row.entity_id,
+    label: row.name || "",
+    size: row.size || null,
+    skus,
+    recommendedSku: recommended?.skuCode ?? null,
+    recommendedAvailableQuantity: recommended?.availableQuantity ?? 0,
+    inStock: Boolean(recommended),
+    ...extra,
+  };
+}
+
+function buildOptionsFromSizeRow(row, inventoryMap, requiredQuantity) {
+  const sizes = normalizeSizes(row.sizes) || {};
+  return Object.entries(sizes).map(([sizeKey, skus]) => {
+    const skusWithInventory = buildSkusWithInventory(
+      skus,
+      inventoryMap,
+      requiredQuantity,
+    );
+    const recommended = pickRecommendedSku(skusWithInventory, requiredQuantity);
+    return {
+      mappingType: "size",
+      entityId: row.entity_id,
+      productId: row.entity_id,
+      label: `${row.name || ""}${sizeKey ? ` - ${sizeKey}` : ""}`.trim(),
+      size: sizeKey,
+      skus: skusWithInventory,
+      recommendedSku: recommended?.skuCode ?? null,
+      recommendedAvailableQuantity: recommended?.availableQuantity ?? 0,
+      inStock: Boolean(recommended),
+    };
+  });
+}
+
+async function fetchMappingRowsForProduct(productId) {
+  const id = String(productId || "").trim();
+
+  const [productRes, variantRes, sizeRes, unmappedRes] = await Promise.all([
+    supabase
+      .from(MAPPINGS_TABLE)
+      .select("*")
+      .eq("mapping_type", "product")
+      .eq("entity_id", id)
+      .maybeSingle(),
+    supabase
+      .from(MAPPINGS_TABLE)
+      .select("*")
+      .eq("mapping_type", "variant")
+      .eq("product_id", id)
+      .order("name", { ascending: true }),
+    supabase
+      .from(MAPPINGS_TABLE)
+      .select("*")
+      .eq("mapping_type", "size")
+      .eq("entity_id", id)
+      .maybeSingle(),
+    supabase
+      .from(UNMAPPED_TABLE)
+      .select("*")
+      .eq("product_id", id)
+      .maybeSingle(),
+  ]);
+
+  for (const res of [productRes, variantRes, sizeRes, unmappedRes]) {
+    if (res.error) {
+      throw new Error(res.error.message);
+    }
+  }
+
+  return {
+    product: productRes.data || null,
+    variants: variantRes.data || [],
+    size: sizeRes.data || null,
+    unmapped: unmappedRes.data || null,
+  };
+}
+
+/**
+ * Product id (EasyOrder) → Bosta mapping options + live inventory per sku.
+ * User picks variant/option and optional skuCode when sending to Bosta.
+ */
+async function getBostaSkuOptionsForProduct(productId, options = {}) {
+  const id = String(productId || "").trim();
+  if (!id) {
+    const err = new Error("productId is required");
+    err.code = "INVALID_PRODUCT_ID";
+    throw err;
+  }
+
+  const requiredQuantity = Math.max(1, Number(options.requiredQuantity) || 1);
+  const rows = await fetchMappingRowsForProduct(id);
+  const { fetchBostaInventoryAvailabilityMap } = require("./bostaFulfillment.service");
+  const inventoryMap = await fetchBostaInventoryAvailabilityMap();
+
+  const mappingOptions = [];
+
+  if (rows.product) {
+    mappingOptions.push(
+      buildOptionBase(rows.product, inventoryMap, requiredQuantity),
+    );
+  }
+
+  for (const variant of rows.variants) {
+    mappingOptions.push(
+      buildOptionBase(variant, inventoryMap, requiredQuantity),
+    );
+  }
+
+  if (rows.size) {
+    mappingOptions.push(
+      ...buildOptionsFromSizeRow(rows.size, inventoryMap, requiredQuantity),
+    );
+  }
+
+  if (!mappingOptions.length) {
+    const err = new Error(
+      rows.unmapped
+        ? "Product is marked as unmapped for Bosta"
+        : "No Bosta SKU mapping found for this product",
+    );
+    err.code = rows.unmapped ? "PRODUCT_UNMAPPED" : "PRODUCT_NOT_MAPPED";
+    err.productId = id;
+    if (rows.unmapped) {
+      err.unmapped = {
+        productId: id,
+        name: rows.unmapped.name || "",
+        reason: rows.unmapped.reason || "",
+      };
+    }
+    throw err;
+  }
+
+  mappingOptions.sort((a, b) => {
+    if (a.inStock !== b.inStock) return Number(b.inStock) - Number(a.inStock);
+    return String(a.label).localeCompare(String(b.label), "ar");
+  });
+
+  const productName =
+    rows.product?.name ||
+    rows.variants[0]?.name?.split(" - ")[0] ||
+    rows.size?.name ||
+    "";
+
+  return {
+    productId: id,
+    productName,
+    requiredQuantity,
+    options: mappingOptions,
+    summary: {
+      totalOptions: mappingOptions.length,
+      inStockOptions: mappingOptions.filter((o) => o.inStock).length,
+      outOfStockOptions: mappingOptions.filter((o) => !o.inStock).length,
+    },
+  };
+}
+
 module.exports = {
   MAPPING_TYPES,
   getBostaSkuMappings,
@@ -764,6 +948,7 @@ module.exports = {
   deleteBostaSkuMapping,
   deleteUnmappedProduct,
   importBostaSkuMappings,
+  getBostaSkuOptionsForProduct,
   resolveMappedSkuCandidatesForLine,
   resolveMappedBostaSkuForLine,
   validateOrderLinesInventory,

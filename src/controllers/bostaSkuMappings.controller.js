@@ -7,6 +7,7 @@ const {
   deleteBostaSkuMapping,
   deleteUnmappedProduct,
   importBostaSkuMappings,
+  getBostaSkuOptionsForProduct,
 } = require("../services/bostaSkuMappings.service");
 
 function mapRowResponse(row) {
@@ -196,6 +197,68 @@ async function deleteUnmappedProductHandler(req, res) {
   }
 }
 
+async function getBostaSkuOptionsByProductHandler(req, res) {
+  try {
+    const productId =
+      req.params.productId ??
+      req.params.product_id ??
+      req.query.product_id ??
+      req.query.productId;
+
+    const quantityRaw = req.query.quantity ?? req.query.qty;
+    const requiredQuantity =
+      quantityRaw != null && String(quantityRaw).trim() !== ""
+        ? Number(quantityRaw)
+        : 1;
+
+    const data = await getBostaSkuOptionsForProduct(productId, {
+      requiredQuantity,
+    });
+
+    res.json({ success: true, data });
+  } catch (error) {
+    if (error.code === "INVALID_PRODUCT_ID") {
+      res.status(400).json({ success: false, message: error.message });
+      return;
+    }
+    if (
+      error.code === "PRODUCT_NOT_MAPPED" ||
+      error.code === "PRODUCT_UNMAPPED"
+    ) {
+      res.status(404).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+        productId: error.productId,
+        unmapped: error.unmapped || null,
+      });
+      return;
+    }
+    if (error.code === "BOSTA_API_KEY_MISSING" || error.code === "BOSTA_FULFILLMENT_API_KEY_MISSING") {
+      res.status(400).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+      });
+      return;
+    }
+    if (error.code === "BOSTA_API_ERROR") {
+      res.status(error.status || 502).json({
+        success: false,
+        message: error.message,
+        code: error.code,
+        details: error.details || null,
+      });
+      return;
+    }
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch Bosta SKU options for product",
+      error: error.message,
+    });
+  }
+}
+
 async function importBostaSkuMappingsHandler(req, res) {
   try {
     const data = await importBostaSkuMappings(req.body || {});
@@ -217,6 +280,7 @@ module.exports = {
   MAPPING_TYPES,
   listBostaSkuMappings,
   getBostaSkuMappingHandler,
+  getBostaSkuOptionsByProductHandler,
   addBostaSkuMappingHandler,
   updateBostaSkuMappingHandler,
   deleteBostaSkuMappingHandler,

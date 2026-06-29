@@ -9,6 +9,7 @@ const {
 const {
   listBostaSkuMappings,
   getBostaSkuMappingHandler,
+  getBostaSkuOptionsByProductHandler,
   addBostaSkuMappingHandler,
   updateBostaSkuMappingHandler,
   deleteBostaSkuMappingHandler,
@@ -31,6 +32,10 @@ router.delete(
   "/sku-mappings/unmapped/:productId",
   requireAuth,
   deleteUnmappedProductHandler,
+);
+router.get(
+  "/sku-mappings/by-product/:productId",
+  getBostaSkuOptionsByProductHandler,
 );
 router.get("/sku-mappings/:mappingType/:entityId", getBostaSkuMappingHandler);
 router.put(
