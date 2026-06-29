@@ -268,7 +268,32 @@ function mergeOrdersFilterSource(req) {
     req.body && typeof req.body === "object" && !Array.isArray(req.body)
       ? req.body
       : {};
+  const method = String(req.method || "GET").toUpperCase();
+  // GET export/list: query string is authoritative (axios may attach a stale body).
+  if (method === "GET" || method === "HEAD") {
+    return { ...body, ...query };
+  }
   return { ...query, ...body };
+}
+
+function pickStatusFilter(source) {
+  if (!source || typeof source !== "object") return undefined;
+  if (Object.prototype.hasOwnProperty.call(source, "status")) {
+    return optionalQueryParam(source.status);
+  }
+  return (
+    optionalQueryParam(source.orderStatus) ??
+    optionalQueryParam(source.order_status)
+  );
+}
+
+/** Treat UI sentinels like "all" as no filter. */
+function optionalEnumFilter(value) {
+  const s = optionalQueryParam(value);
+  if (!s) return undefined;
+  const lower = s.toLowerCase();
+  if (lower === "all" || lower === "any" || lower === "*") return undefined;
+  return s;
 }
 
 function buildOrdersListFilters(req, pagination = {}) {
@@ -305,18 +330,16 @@ function buildOrdersListFilters(req, pagination = {}) {
     throw err;
   }
 
-  const statusRaw = optionalQueryParam(source.status);
+  const statusRaw = pickStatusFilter(source);
   const status = statusRaw ? normalizeOrderStatusInput(statusRaw) : undefined;
   const employeeId = optionalQueryParam(
     source.employeeId || source.employee_id || source.userId,
   );
-  const order_source = optionalQueryParam(
+  const order_source = optionalEnumFilter(
     source.order_source || source.orderSource,
   );
-  const order_type = optionalQueryParam(
-    source.order_type || source.orderType,
-  );
-  const shipping_status = optionalQueryParam(
+  const order_type = optionalEnumFilter(source.order_type || source.orderType);
+  const shipping_status = optionalEnumFilter(
     source.shipping_status || source.shippingStatus,
   );
   const easyorder_id = optionalQueryParam(
