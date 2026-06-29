@@ -526,7 +526,11 @@ async function getOrders(req, res) {
     res.status(500).json({
       success: false,
       message: "Failed to fetch orders",
-      error: error?.message || String(error) || "Unknown error",
+      error:
+        error?.message ||
+        error?.cause?.message ||
+        String(error) ||
+        "Unknown error",
     });
   }
 }

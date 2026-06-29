@@ -458,32 +458,80 @@ function membershipNeedsChunkedFetch(orderIds) {
 
 function formatSupabaseError(error) {
   if (!error) return new Error("Database query failed");
-  const msg = [error.message, error.details, error.hint]
+  const causeMsg =
+    error.cause && typeof error.cause === "object"
+      ? error.cause.message || String(error.cause)
+      : "";
+  const msg = [error.message, error.details, error.hint, causeMsg]
     .filter((part) => part && String(part).trim())
     .join(" — ");
   return new Error(msg || "Database query failed");
 }
 
-async function fetchOrderRowsByMembershipChunks(membershipIds, applyExtraFilters) {
+async function fetchOrdersPageByMembershipChunks(
+  membershipIds,
+  applyExtraFilters,
+  { page, limit },
+) {
   const ids = normalizeOrderIdList(membershipIds);
-  if (!ids.length) return [];
-
-  const rows = [];
-  for (const chunk of chunkArray(ids, ORDER_ID_FETCH_CHUNK)) {
-    let q = supabase.from(ORDERS_TABLE).select("*");
-    q = applyExtraFilters(q);
-    q = q.in("order_id", chunk);
-    const { data, error } = await q;
-    if (error) {
-      throw formatSupabaseError(error);
-    }
-    rows.push(...(data || []));
+  if (!ids.length) {
+    return { data: [], total: 0 };
   }
 
-  rows.sort(
-    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  const stubs = [];
+  const chunks = chunkArray(ids, ORDER_ID_FETCH_CHUNK);
+  const CONCURRENCY = 6;
+
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const batch = chunks.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (chunk) => {
+        let q = supabase.from(ORDERS_TABLE).select("order_id, created_at");
+        q = applyExtraFilters(q);
+        q = q.in("order_id", chunk);
+        const { data, error } = await q;
+        if (error) {
+          throw formatSupabaseError(error);
+        }
+        return data || [];
+      }),
+    );
+    for (const part of results) {
+      stubs.push(...part);
+    }
+  }
+
+  stubs.sort(
+    (a, b) =>
+      new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
   );
-  return rows;
+  const total = stubs.length;
+  const fromIndex = (page - 1) * limit;
+  const pageIds = stubs
+    .slice(fromIndex, fromIndex + limit)
+    .map((row) => String(row.order_id).trim())
+    .filter(Boolean);
+
+  if (!pageIds.length) {
+    return { data: [], total };
+  }
+
+  const { data, error } = await supabase
+    .from(ORDERS_TABLE)
+    .select("*")
+    .in("order_id", pageIds);
+  if (error) {
+    throw formatSupabaseError(error);
+  }
+
+  const byId = new Map(
+    (data || []).map((row) => [String(row.order_id).trim(), row]),
+  );
+  const orderedRows = pageIds
+    .map((id) => byId.get(id))
+    .filter(Boolean);
+
+  return { data: orderedRows, total };
 }
 
 /** قيمة آمنة للبحث؛ إن أصبحت فارغة بعد التنقية يُهمَل الفلتر (لا 400). */
@@ -1525,10 +1573,13 @@ async function getWebhookOrders({
       employeeKey: scoped.employeeKey,
       employeeEmail: scoped.employeeEmail,
     };
-    orderIdsByEmployee = await filterOrderIdsForEmployeeScope(
-      scoped.orderIds,
-      employeeScope,
-    );
+    orderIdsByEmployee =
+      scoped.orderIds.length > SKIP_EMPLOYEE_SCOPE_REFINE_MIN
+        ? scoped.orderIds
+        : await filterOrderIdsForEmployeeScope(
+            scoped.orderIds,
+            employeeScope,
+          );
 
     if (!orderIdsByEmployee.length) {
       return {
@@ -1670,16 +1721,15 @@ async function getWebhookOrders({
   }
 
   if (membershipOrderIds && membershipNeedsChunkedFetch(membershipOrderIds)) {
-    const allRows = await fetchOrderRowsByMembershipChunks(
+    const { data: rows, total } = await fetchOrdersPageByMembershipChunks(
       membershipOrderIds,
       (q) => {
         let next = applyCoreListFilters(q);
         next = applyProductListFilters(next);
         return next;
       },
+      { page, limit },
     );
-    const total = allRows.length;
-    const rows = allRows.slice(fromIndex, fromIndex + limit);
     return {
       page,
       limit,
@@ -2147,6 +2197,8 @@ function chunkArray(arr, size) {
 
 const ORDER_ID_IN_URL_CHUNK = 80;
 const ORDER_ID_FETCH_CHUNK = 40;
+/** Skip expensive per-row employee refine when logs/raw already resolved many ids. */
+const SKIP_EMPLOYEE_SCOPE_REFINE_MIN = 150;
 
 const PostgrestReservedCharsRegexp = new RegExp("[,()]");
 
