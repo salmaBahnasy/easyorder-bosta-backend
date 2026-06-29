@@ -17,6 +17,7 @@ const {
   ORDER_TYPES,
   SHIPPING_STATUSES,
   getOrdersFilterLists,
+  normalizeOrderStatusInput,
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
 const {
@@ -258,54 +259,90 @@ function resolveOrderCostChartDateRange(req) {
   return resolveOrdersTrendDateRange(req);
 }
 
-function buildOrdersListFilters(req, pagination = {}) {
-  const page = Number(pagination.page ?? req.query.page) || 1;
-  const limit = Number(pagination.limit ?? req.query.limit) || 50;
+function mergeOrdersFilterSource(req) {
+  const query =
+    req.query && typeof req.query === "object" && !Array.isArray(req.query)
+      ? req.query
+      : {};
+  const body =
+    req.body && typeof req.body === "object" && !Array.isArray(req.body)
+      ? req.body
+      : {};
+  return { ...query, ...body };
+}
 
-  const { from, to } = resolveOrdersListDateRange(req);
-  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+function buildOrdersListFilters(req, pagination = {}) {
+  const source = mergeOrdersFilterSource(req);
+  const page = Number(pagination.page ?? source.page) || 1;
+  const limit = Number(pagination.limit ?? source.limit) || 50;
+
+  const filterReq = {
+    ...req,
+    query: source,
+    originalUrl: req.originalUrl,
+    baseUrl: req.baseUrl,
+  };
+
+  const range = resolveOrdersListDateRange(filterReq);
+  let from = range.from;
+  let to = range.to;
+
+  if (from && !to) {
+    to = new Date();
+  }
+  if (!from && to) {
+    from = getEgyptMonthToDateRange().from;
+  }
+
+  if (
+    !from ||
+    !to ||
+    Number.isNaN(from.getTime()) ||
+    Number.isNaN(to.getTime())
+  ) {
     const err = new Error("Invalid from or to date");
     err.code = "INVALID_DATE_RANGE";
     throw err;
   }
 
-  const status = optionalQueryParam(req.query.status);
+  const statusRaw = optionalQueryParam(source.status);
+  const status = statusRaw ? normalizeOrderStatusInput(statusRaw) : undefined;
   const employeeId = optionalQueryParam(
-    req.query.employeeId || req.query.employee_id || req.query.userId,
+    source.employeeId || source.employee_id || source.userId,
   );
   const order_source = optionalQueryParam(
-    req.query.order_source || req.query.orderSource,
+    source.order_source || source.orderSource,
   );
   const order_type = optionalQueryParam(
-    req.query.order_type || req.query.orderType,
+    source.order_type || source.orderType,
   );
   const shipping_status = optionalQueryParam(
-    req.query.shipping_status || req.query.shippingStatus,
+    source.shipping_status || source.shippingStatus,
   );
   const easyorder_id = optionalQueryParam(
-    req.query.easyorder_id || req.query.easyorderId,
+    source.easyorder_id || source.easyorderId,
   );
   const product_id =
-    optionalQueryParam(req.query.product_id || req.query.productId) ||
+    optionalQueryParam(source.product_id || source.productId) ||
     easyorder_id;
   const product_sku = optionalQueryParam(
-    req.query.product_sku || req.query.productSku,
+    source.product_sku || source.productSku,
   );
   const phone = optionalQueryParam(
-    req.query.phone ||
-      req.query.mobile ||
-      req.query.customerPhone ||
-      req.query.customer_phone,
+    source.phone ||
+      source.mobile ||
+      source.customerPhone ||
+      source.customer_phone,
   );
   const customer_name = optionalQueryParam(
-    req.query.customer_name ||
-      req.query.customerName ||
-      req.query.full_name ||
-      req.query.fullName ||
-      req.query.name,
+    source.customer_name ||
+      source.customerName ||
+      source.full_name ||
+      source.fullName ||
+      source.name,
   );
   const employee_scope = optionalQueryParam(
-    req.query.employee_scope || req.query.employeeScope,
+    source.employee_scope || source.employeeScope,
   );
   const ignoreEmployeeLogDateRange =
     employee_scope === "all" ||
@@ -313,7 +350,9 @@ function buildOrdersListFilters(req, pagination = {}) {
     employee_scope === "all_time";
 
   if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
-    const err = new Error("Invalid status filter");
+    const err = new Error(
+      `Invalid status filter${statusRaw ? `: ${statusRaw}` : ""}`,
+    );
     err.code = "INVALID_STATUS";
     throw err;
   }
@@ -509,7 +548,13 @@ async function exportOrders(req, res) {
     }
 
     const maxRows = Math.min(
-      Math.max(1, Number(req.query.maxRows ?? req.query.max_rows) || 10000),
+      Math.max(
+        1,
+        Number(
+          mergeOrdersFilterSource(req).maxRows ??
+            mergeOrdersFilterSource(req).max_rows,
+        ) || 10000,
+      ),
       20000,
     );
 

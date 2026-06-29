@@ -31,6 +31,7 @@ router.post("/charts/order-cost", saveOrderCostDailyHandler);
 router.get("/charts/order-cost", getOrderCostChartHandler);
 router.get("/costs", getOrderCosts);
 router.get("/export", requireAuth, exportOrders);
+router.post("/export", requireAuth, exportOrders);
 router.get("/reference/:orderReference", getOrderByReference);
 router.get("/reference", getOrderByReference);
 router.post("/send-to-bosta/bulk", requireAuth, sendOrdersToBostaBulk);

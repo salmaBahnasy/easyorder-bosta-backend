@@ -323,6 +323,7 @@ function normalizeOrderStatusInput(value) {
     cancelled: "canceled",
     new: "new",
     no_replay: "no_replay",
+    "no-replay": "no_replay",
     noreply: "no_replay",
     "no reply": "no_replay",
     repeater: "repeater",
@@ -3955,4 +3956,5 @@ module.exports = {
   SHIPPING_STATUS_OPTIONS,
   ORDER_STATUS_OPTIONS,
   getOrdersFilterLists,
+  normalizeOrderStatusInput,
 };
