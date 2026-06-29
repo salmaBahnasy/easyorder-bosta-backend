@@ -413,13 +413,13 @@ async function getFulfillment(path, params = {}) {
   return response.data;
 }
 
-/** skuCode → availableQuantity (مجموع لو نفس SKU في أكثر من hub) */
-async function fetchBostaInventoryAvailabilityMap() {
+/** skuCode → { availableQuantity, name, description } */
+async function fetchBostaInventoryDetailsMap() {
   const pageSize = Math.min(
     Number(process.env.BOSTA_INVENTORY_PAGE_SIZE) || 100,
     500,
   );
-  const availability = new Map();
+  const details = new Map();
   let page = 1;
 
   for (;;) {
@@ -441,7 +441,19 @@ async function fetchBostaInventoryAvailabilityMap() {
       if (!sku) continue;
       const qty = Number(row?.availableQuantity);
       const available = Number.isFinite(qty) && qty > 0 ? qty : 0;
-      availability.set(sku, (availability.get(sku) || 0) + available);
+      const existing = details.get(sku);
+      if (existing) {
+        existing.availableQuantity += available;
+        if (!existing.name && row?.name) {
+          existing.name = String(row.name).trim();
+        }
+      } else {
+        details.set(sku, {
+          availableQuantity: available,
+          name: String(row?.name || "").trim(),
+          description: String(row?.description || "").trim(),
+        });
+      }
     }
 
     if (rows.length < pageSize) break;
@@ -449,6 +461,16 @@ async function fetchBostaInventoryAvailabilityMap() {
     if (page > 100) break;
   }
 
+  return details;
+}
+
+/** skuCode → availableQuantity (مجموع لو نفس SKU في أكثر من hub) */
+async function fetchBostaInventoryAvailabilityMap() {
+  const details = await fetchBostaInventoryDetailsMap();
+  const availability = new Map();
+  for (const [sku, info] of details) {
+    availability.set(sku, info.availableQuantity);
+  }
   return availability;
 }
 
@@ -483,6 +505,7 @@ module.exports = {
   createFulfillmentOrder,
   createFulfillmentOrdersBulk,
   fetchBostaInventoryAvailabilityMap,
+  fetchBostaInventoryDetailsMap,
   getFulfillment,
   getFulfillmentKeyDiagnostics,
 };

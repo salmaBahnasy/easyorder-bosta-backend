@@ -755,12 +755,14 @@ async function validateOrderLinesInventory(localOrder) {
   return { items, inventoryMap, maps };
 }
 
-function buildSkusWithInventory(skus, inventoryMap, requiredQuantity = 1) {
+function buildSkusWithInventory(skus, inventoryDetailsMap, requiredQuantity = 1) {
   const qtyNeeded = Math.max(1, Number(requiredQuantity) || 1);
   return normalizeSkus(skus).map((skuCode) => {
-    const availableQuantity = Number(inventoryMap.get(skuCode) || 0);
+    const info = inventoryDetailsMap.get(skuCode);
+    const availableQuantity = Number(info?.availableQuantity || 0);
     return {
       skuCode,
+      name: info?.name || "",
       availableQuantity,
       inStock: availableQuantity >= qtyNeeded,
     };
@@ -777,29 +779,34 @@ function pickRecommendedSku(skusWithInventory, requiredQuantity = 1) {
   return null;
 }
 
-function buildOptionBase(row, inventoryMap, requiredQuantity, extra = {}) {
-  const skus = buildSkusWithInventory(row.skus, inventoryMap, requiredQuantity);
+function buildOptionBase(row, inventoryDetailsMap, requiredQuantity, extra = {}) {
+  const mappingName = String(row.name || "").trim();
+  const skus = buildSkusWithInventory(row.skus, inventoryDetailsMap, requiredQuantity);
   const recommended = pickRecommendedSku(skus, requiredQuantity);
   return {
     mappingType: row.mapping_type,
     entityId: row.entity_id,
     productId: row.product_id || row.entity_id,
-    label: row.name || "",
+    name: mappingName,
+    label: mappingName,
     size: row.size || null,
     skus,
     recommendedSku: recommended?.skuCode ?? null,
+    recommendedName: recommended?.name ?? null,
     recommendedAvailableQuantity: recommended?.availableQuantity ?? 0,
     inStock: Boolean(recommended),
     ...extra,
   };
 }
 
-function buildOptionsFromSizeRow(row, inventoryMap, requiredQuantity) {
+function buildOptionsFromSizeRow(row, inventoryDetailsMap, requiredQuantity) {
   const sizes = normalizeSizes(row.sizes) || {};
+  const baseName = String(row.name || "").trim();
   return Object.entries(sizes).map(([sizeKey, skus]) => {
+    const mappingName = `${baseName}${sizeKey ? ` - ${sizeKey}` : ""}`.trim();
     const skusWithInventory = buildSkusWithInventory(
       skus,
-      inventoryMap,
+      inventoryDetailsMap,
       requiredQuantity,
     );
     const recommended = pickRecommendedSku(skusWithInventory, requiredQuantity);
@@ -807,10 +814,12 @@ function buildOptionsFromSizeRow(row, inventoryMap, requiredQuantity) {
       mappingType: "size",
       entityId: row.entity_id,
       productId: row.entity_id,
-      label: `${row.name || ""}${sizeKey ? ` - ${sizeKey}` : ""}`.trim(),
+      name: mappingName,
+      label: mappingName,
       size: sizeKey,
       skus: skusWithInventory,
       recommendedSku: recommended?.skuCode ?? null,
+      recommendedName: recommended?.name ?? null,
       recommendedAvailableQuantity: recommended?.availableQuantity ?? 0,
       inStock: Boolean(recommended),
     };
@@ -874,26 +883,26 @@ async function getBostaSkuOptionsForProduct(productId, options = {}) {
 
   const requiredQuantity = Math.max(1, Number(options.requiredQuantity) || 1);
   const rows = await fetchMappingRowsForProduct(id);
-  const { fetchBostaInventoryAvailabilityMap } = require("./bostaFulfillment.service");
-  const inventoryMap = await fetchBostaInventoryAvailabilityMap();
+  const { fetchBostaInventoryDetailsMap } = require("./bostaFulfillment.service");
+  const inventoryDetailsMap = await fetchBostaInventoryDetailsMap();
 
   const mappingOptions = [];
 
   if (rows.product) {
     mappingOptions.push(
-      buildOptionBase(rows.product, inventoryMap, requiredQuantity),
+      buildOptionBase(rows.product, inventoryDetailsMap, requiredQuantity),
     );
   }
 
   for (const variant of rows.variants) {
     mappingOptions.push(
-      buildOptionBase(variant, inventoryMap, requiredQuantity),
+      buildOptionBase(variant, inventoryDetailsMap, requiredQuantity),
     );
   }
 
   if (rows.size) {
     mappingOptions.push(
-      ...buildOptionsFromSizeRow(rows.size, inventoryMap, requiredQuantity),
+      ...buildOptionsFromSizeRow(rows.size, inventoryDetailsMap, requiredQuantity),
     );
   }
 
