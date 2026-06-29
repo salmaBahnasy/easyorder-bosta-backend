@@ -432,6 +432,60 @@ function intersectOrderIdLists(...lists) {
   return result;
 }
 
+function normalizeOrderIdList(orderIds) {
+  return [
+    ...new Set((orderIds || []).map((x) => String(x).trim()).filter(Boolean)),
+  ];
+}
+
+function resolveListMembershipOrderIds(orderIdsByEmployee, scopedOrderIds) {
+  const employeeIds = orderIdsByEmployee
+    ? normalizeOrderIdList(orderIdsByEmployee)
+    : null;
+  const scopedIds = scopedOrderIds
+    ? normalizeOrderIdList(scopedOrderIds)
+    : null;
+  if (employeeIds && scopedIds) {
+    const scopedSet = new Set(scopedIds);
+    return employeeIds.filter((id) => scopedSet.has(id));
+  }
+  return employeeIds || scopedIds || null;
+}
+
+function membershipNeedsChunkedFetch(orderIds) {
+  return normalizeOrderIdList(orderIds).length > ORDER_ID_IN_URL_CHUNK;
+}
+
+function formatSupabaseError(error) {
+  if (!error) return new Error("Database query failed");
+  const msg = [error.message, error.details, error.hint]
+    .filter((part) => part && String(part).trim())
+    .join(" — ");
+  return new Error(msg || "Database query failed");
+}
+
+async function fetchOrderRowsByMembershipChunks(membershipIds, applyExtraFilters) {
+  const ids = normalizeOrderIdList(membershipIds);
+  if (!ids.length) return [];
+
+  const rows = [];
+  for (const chunk of chunkArray(ids, ORDER_ID_FETCH_CHUNK)) {
+    let q = supabase.from(ORDERS_TABLE).select("*");
+    q = applyExtraFilters(q);
+    q = q.in("order_id", chunk);
+    const { data, error } = await q;
+    if (error) {
+      throw formatSupabaseError(error);
+    }
+    rows.push(...(data || []));
+  }
+
+  rows.sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+  );
+  return rows;
+}
+
 /** قيمة آمنة للبحث؛ إن أصبحت فارغة بعد التنقية يُهمَل الفلتر (لا 400). */
 function parseProductFilterInput(raw) {
   if (raw == null || String(raw).trim() === "") return "";
@@ -1487,7 +1541,7 @@ async function getWebhookOrders({
     }
   }
 
-  function applyBaseListFilters(q) {
+  function applyCoreListFilters(q) {
     if (from && !skipOrderCreatedAtRange) {
       q = q.gte("created_at", from.toISOString());
     }
@@ -1497,12 +1551,20 @@ async function getWebhookOrders({
     if (status) {
       q = q.eq("status", status);
     }
-    q = applyRawDataMetaContains(q, {
+    return applyRawDataMetaContains(q, {
       order_source,
       order_type,
       shipping_status,
     });
-    if (orderIdsByEmployee) {
+  }
+
+  const useChunkedEmployeeMembership =
+    orderIdsByEmployee &&
+    membershipNeedsChunkedFetch(orderIdsByEmployee);
+
+  function applyBaseListFilters(q) {
+    q = applyCoreListFilters(q);
+    if (orderIdsByEmployee && !useChunkedEmployeeMembership) {
       q = applyOrderIdMembershipFilter(q, orderIdsByEmployee);
     }
     return q;
@@ -1534,6 +1596,19 @@ async function getWebhookOrders({
         data: [],
       };
     }
+    if (useChunkedEmployeeMembership && orderIdsByEmployee) {
+      const employeeSet = new Set(orderIdsByEmployee);
+      phoneOrderIds = phoneOrderIds.filter((id) => employeeSet.has(String(id)));
+      if (!phoneOrderIds.length) {
+        return {
+          page,
+          limit,
+          total: 0,
+          totalPages: 1,
+          data: [],
+        };
+      }
+    }
   }
 
   const customerNameNeedle = parseProductFilterInput(customer_name);
@@ -1555,6 +1630,21 @@ async function getWebhookOrders({
         data: [],
       };
     }
+    if (useChunkedEmployeeMembership && orderIdsByEmployee) {
+      const employeeSet = new Set(orderIdsByEmployee);
+      customerNameOrderIds = customerNameOrderIds.filter((id) =>
+        employeeSet.has(String(id)),
+      );
+      if (!customerNameOrderIds.length) {
+        return {
+          page,
+          limit,
+          total: 0,
+          totalPages: 1,
+          data: [],
+        };
+      }
+    }
   }
 
   const scopedOrderIds = intersectOrderIdLists(
@@ -1562,30 +1652,58 @@ async function getWebhookOrders({
     customerNameOrderIds,
   );
 
-  function applyBaseListFiltersAndScopedIds(q) {
-    let x = applyBaseListFilters(q);
-    if (scopedOrderIds) {
-      x = applyOrderIdMembershipFilter(x, scopedOrderIds);
-    }
-    return x;
-  }
+  const membershipOrderIds = resolveListMembershipOrderIds(
+    orderIdsByEmployee,
+    scopedOrderIds,
+  );
 
   const pidForProduct = normalizeProductIdForCartFilter(product_id);
   const skuForProduct = parseProductFilterInput(product_sku);
   const useProductUuidContains =
     pidForProduct && UUID_LIKE.test(pidForProduct) && !skuForProduct;
 
-  let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
-  query = applyBaseListFilters(query);
-  if (scopedOrderIds) {
-    query = applyOrderIdMembershipFilter(query, scopedOrderIds);
+  function applyProductListFilters(q) {
+    if (useProductUuidContains) {
+      return applyProductUuidCartContainsOr(q, pidForProduct);
+    }
+    return applyProductCartIlikeFilters(q, { product_id, product_sku });
   }
 
-  if (useProductUuidContains) {
-    query = applyProductUuidCartContainsOr(query, pidForProduct);
-  } else {
-    query = applyProductCartIlikeFilters(query, { product_id, product_sku });
+  if (membershipOrderIds && membershipNeedsChunkedFetch(membershipOrderIds)) {
+    const allRows = await fetchOrderRowsByMembershipChunks(
+      membershipOrderIds,
+      (q) => {
+        let next = applyCoreListFilters(q);
+        next = applyProductListFilters(next);
+        return next;
+      },
+    );
+    const total = allRows.length;
+    const rows = allRows.slice(fromIndex, fromIndex + limit);
+    return {
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit) || 1,
+      data: rows.map((entry) => mapStoredOrderToClient(entry)),
+    };
   }
+
+  function applyBaseListFiltersAndScopedIds(q) {
+    let x = applyBaseListFilters(q);
+    if (scopedOrderIds && !orderIdsByEmployee) {
+      x = applyOrderIdMembershipFilter(x, scopedOrderIds);
+    }
+    return x;
+  }
+
+  let query = supabase.from(ORDERS_TABLE).select("*", { count: "exact" });
+  query = applyCoreListFilters(query);
+  if (membershipOrderIds) {
+    query = applyOrderIdMembershipFilter(query, membershipOrderIds);
+  }
+
+  query = applyProductListFilters(query);
 
   query = query
     .order("created_at", { ascending: false })
@@ -1594,7 +1712,7 @@ async function getWebhookOrders({
   const { data, count, error } = await query;
 
   if (error) {
-    throw new Error(error.message);
+    throw formatSupabaseError(error);
   }
 
   const rows = data || [];
@@ -2028,6 +2146,7 @@ function chunkArray(arr, size) {
 }
 
 const ORDER_ID_IN_URL_CHUNK = 80;
+const ORDER_ID_FETCH_CHUNK = 40;
 
 const PostgrestReservedCharsRegexp = new RegExp("[,()]");
 
