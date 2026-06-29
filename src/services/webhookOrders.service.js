@@ -559,6 +559,15 @@ function escapeIlikeLiteral(value) {
 async function resolveEmployeeToIdForLogs(employeeFilter) {
   const raw = String(employeeFilter).trim();
   if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (
+    lower === "all" ||
+    lower === "any" ||
+    lower === "*" ||
+    lower === "everyone"
+  ) {
+    return null;
+  }
   if (!raw.includes("@")) return raw;
 
   const literal = escapeIlikeLiteral(raw);

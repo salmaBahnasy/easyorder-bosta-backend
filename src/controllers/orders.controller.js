@@ -287,13 +287,28 @@ function pickStatusFilter(source) {
   );
 }
 
-/** Treat UI sentinels like "all" as no filter. */
-function optionalEnumFilter(value) {
+/** Treat UI sentinels like "all" / "كل الموظفين" value as no filter. */
+function optionalSentinelFilter(value) {
   const s = optionalQueryParam(value);
   if (!s) return undefined;
   const lower = s.toLowerCase();
-  if (lower === "all" || lower === "any" || lower === "*") return undefined;
+  if (
+    lower === "all" ||
+    lower === "any" ||
+    lower === "*" ||
+    lower === "everyone" ||
+    lower === "none" ||
+    lower === "null" ||
+    lower === "undefined"
+  ) {
+    return undefined;
+  }
   return s;
+}
+
+/** @deprecated alias */
+function optionalEnumFilter(value) {
+  return optionalSentinelFilter(value);
 }
 
 function buildOrdersListFilters(req, pagination = {}) {
@@ -332,21 +347,21 @@ function buildOrdersListFilters(req, pagination = {}) {
 
   const statusRaw = pickStatusFilter(source);
   const status = statusRaw ? normalizeOrderStatusInput(statusRaw) : undefined;
-  const employeeId = optionalQueryParam(
+  const employeeId = optionalSentinelFilter(
     source.employeeId || source.employee_id || source.userId,
   );
-  const order_source = optionalEnumFilter(
+  const order_source = optionalSentinelFilter(
     source.order_source || source.orderSource,
   );
-  const order_type = optionalEnumFilter(source.order_type || source.orderType);
-  const shipping_status = optionalEnumFilter(
+  const order_type = optionalSentinelFilter(source.order_type || source.orderType);
+  const shipping_status = optionalSentinelFilter(
     source.shipping_status || source.shippingStatus,
   );
-  const easyorder_id = optionalQueryParam(
+  const easyorder_id = optionalSentinelFilter(
     source.easyorder_id || source.easyorderId,
   );
   const product_id =
-    optionalQueryParam(source.product_id || source.productId) ||
+    optionalSentinelFilter(source.product_id || source.productId) ||
     easyorder_id;
   const product_sku = optionalQueryParam(
     source.product_sku || source.productSku,
@@ -511,7 +526,7 @@ async function getOrders(req, res) {
     res.status(500).json({
       success: false,
       message: "Failed to fetch orders",
-      error: error.message,
+      error: error?.message || String(error) || "Unknown error",
     });
   }
 }
@@ -960,7 +975,20 @@ function normalizeQueryId(value) {
   if (value == null) return null;
   const raw = Array.isArray(value) ? value[0] : value;
   const s = String(raw).trim();
-  return s || null;
+  if (!s) return null;
+  const lower = s.toLowerCase();
+  if (
+    lower === "all" ||
+    lower === "any" ||
+    lower === "*" ||
+    lower === "everyone" ||
+    lower === "none" ||
+    lower === "null" ||
+    lower === "undefined"
+  ) {
+    return null;
+  }
+  return s;
 }
 
 async function getOrdersStats(req, res) {
