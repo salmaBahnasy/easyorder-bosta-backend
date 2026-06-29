@@ -14,6 +14,7 @@ const {
 
 function pickOverrides(body = {}) {
   const src = body.overrides && typeof body.overrides === "object" ? body.overrides : body;
+  const { parseLineSkuOverrides } = require("../services/bostaSkuMappings.service");
   return {
     orderAlias: src.orderAlias ?? src.order_alias,
     cityId: src.cityId ?? src.city_id ?? src.bosta_city_id,
@@ -28,6 +29,7 @@ function pickOverrides(body = {}) {
     mobile: src.mobile ?? src.phone,
     type: src.type,
     defaultSkuCode: src.defaultSkuCode ?? src.default_sku_code,
+    lineSkuOverrides: parseLineSkuOverrides(body),
   };
 }
 

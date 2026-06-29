@@ -512,6 +512,262 @@ function pickLineDisplayName(line, mappingName = "") {
   );
 }
 
+/** SKU chosen by user on create/edit order or send-to-bosta body. */
+function pickLineSelectedBostaSku(line) {
+  const variant =
+    line?.variant && typeof line.variant === "object" ? line.variant : {};
+  const candidates = [
+    line?.bosta_sku,
+    line?.bostaSku,
+    line?.bostaSkuCode,
+    line?.skuCode,
+    variant?.bosta_sku,
+    variant?.bostaSku,
+    variant?.sku,
+    line?.sku,
+  ];
+
+  for (const candidate of candidates) {
+    const value = String(candidate || "").trim();
+    if (value && /^bo-/i.test(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function normalizeBostaSkuCode(value) {
+  const sku = String(value || "").trim();
+  if (!sku || !/^bo-/i.test(sku)) return null;
+  return sku;
+}
+
+/** Parse SKU overrides from send-to-bosta request body → Map<lineIndex, skuCode>. */
+function parseLineSkuOverrides(body = {}) {
+  const src =
+    body?.overrides && typeof body.overrides === "object" ? body.overrides : body;
+  const byIndex = new Map();
+
+  const rootSku = normalizeBostaSkuCode(
+    src.skuCode ?? src.sku ?? src.bosta_sku ?? src.bostaSku,
+  );
+  if (rootSku) {
+    byIndex.set(0, rootSku);
+  }
+
+  const listSources = [
+    src.lineSkus,
+    src.line_skus,
+    src.items,
+    src.skus,
+    src.cart_items,
+    src.cartItems,
+  ];
+
+  for (const list of listSources) {
+    if (!Array.isArray(list)) continue;
+    for (let i = 0; i < list.length; i += 1) {
+      const entry = list[i];
+      if (entry == null) continue;
+
+      if (typeof entry === "string") {
+        const sku = normalizeBostaSkuCode(entry);
+        if (sku) byIndex.set(i, sku);
+        continue;
+      }
+
+      if (typeof entry !== "object") continue;
+
+      const lineIndex = Number(
+        entry.lineIndex ?? entry.line_index ?? entry.index ?? i,
+      );
+      const sku = normalizeBostaSkuCode(
+        entry.skuCode ??
+          entry.sku ??
+          entry.bosta_sku ??
+          entry.bostaSku ??
+          entry.bostaSkuCode,
+      );
+      if (sku && Number.isFinite(lineIndex) && lineIndex >= 0) {
+        byIndex.set(lineIndex, sku);
+      }
+    }
+  }
+
+  return byIndex;
+}
+
+function applyLineSkuOverridesToOrder(localOrder, lineSkuOverrides) {
+  if (!localOrder || typeof localOrder !== "object") return localOrder;
+  if (!lineSkuOverrides || !(lineSkuOverrides instanceof Map) || !lineSkuOverrides.size) {
+    return localOrder;
+  }
+
+  const cartKey = Array.isArray(localOrder.cart_items)
+    ? "cart_items"
+    : Array.isArray(localOrder.cartItems)
+      ? "cartItems"
+      : null;
+  if (!cartKey) return localOrder;
+
+  const lines = [...localOrder[cartKey]];
+  for (const [index, sku] of lineSkuOverrides.entries()) {
+    if (!lines[index] || typeof lines[index] !== "object") continue;
+    const line = { ...lines[index] };
+    const variant =
+      line.variant && typeof line.variant === "object"
+        ? { ...line.variant }
+        : {};
+
+    line.bosta_sku = sku;
+    line.bostaSku = sku;
+    line.skuCode = sku;
+    variant.sku = sku;
+    variant.bosta_sku = sku;
+    line.variant = variant;
+    lines[index] = line;
+  }
+
+  return {
+    ...localOrder,
+    [cartKey]: normalizeCartItemsBostaFields(lines),
+  };
+}
+
+function normalizeCartItemsBostaFields(cartItems) {
+  if (!Array.isArray(cartItems)) return cartItems;
+
+  return cartItems.map((line) => {
+    if (!line || typeof line !== "object") return line;
+
+    const selectedSku = pickLineSelectedBostaSku(line);
+    const variant =
+      line.variant && typeof line.variant === "object"
+        ? { ...line.variant }
+        : {};
+    const bostaName = String(
+      line.bosta_name ??
+        line.bostaName ??
+        variant.bosta_name ??
+        variant.bostaName ??
+        variant.name ??
+        "",
+    ).trim();
+
+    if (!selectedSku && !bostaName) return line;
+
+    const out = { ...line, variant };
+    if (selectedSku) {
+      out.bosta_sku = selectedSku;
+      out.bostaSku = selectedSku;
+      variant.sku = selectedSku;
+      variant.bosta_sku = selectedSku;
+    }
+    if (bostaName) {
+      out.bosta_name = bostaName;
+      out.bostaName = bostaName;
+      if (!variant.name) variant.name = bostaName;
+    }
+    out.variant = variant;
+    return out;
+  });
+}
+
+function resolveLineSkuForBosta(line, maps, inventoryMap, requiredQty) {
+  const requiredQuantity = Math.max(1, Number(requiredQty) || 1);
+  const resolved = resolveMappedSkuCandidatesForLine(line, maps);
+  const userSku = pickLineSelectedBostaSku(line);
+
+  if (userSku) {
+    const candidateSkus = normalizeSkus(resolved.skus);
+    if (candidateSkus.length && !candidateSkus.includes(userSku)) {
+      return {
+        ok: false,
+        reason: "invalid_selected_sku",
+        productName: resolved.productName,
+        requiredQuantity,
+        selectedSku: userSku,
+        candidateSkus,
+        mappingType: resolved.mappingType,
+        entityId: resolved.entityId,
+      };
+    }
+
+    const availableQuantity = Number(inventoryMap.get(userSku) || 0);
+    if (availableQuantity < requiredQuantity) {
+      return {
+        ok: false,
+        reason: "out_of_stock",
+        productName: resolved.productName,
+        requiredQuantity,
+        selectedSku: userSku,
+        candidateSkus: candidateSkus.length ? candidateSkus : [userSku],
+        availableQuantity,
+        mappingType: resolved.mappingType,
+        entityId: resolved.entityId,
+      };
+    }
+
+    return {
+      ok: true,
+      skuCode: userSku,
+      availableQuantity,
+      productName: resolved.productName,
+      requiredQuantity,
+      source: "user_selected",
+      mappingType: resolved.mappingType,
+      entityId: resolved.entityId,
+    };
+  }
+
+  if (!resolved.skus.length) {
+    return {
+      ok: false,
+      reason: "no_sku_mapping",
+      productName: resolved.productName,
+      requiredQuantity,
+      candidateSkus: [],
+      availableQuantity: 0,
+      mappingType: resolved.mappingType,
+      entityId: resolved.entityId,
+    };
+  }
+
+  const picked = pickAvailableSkuFromCandidates(
+    resolved.skus,
+    requiredQuantity,
+    inventoryMap,
+  );
+
+  if (!picked) {
+    return {
+      ok: false,
+      reason: "out_of_stock",
+      productName: resolved.productName,
+      requiredQuantity,
+      candidateSkus: resolved.skus,
+      availableQuantity: Math.max(
+        ...resolved.skus.map((sku) => Number(inventoryMap.get(sku) || 0)),
+        0,
+      ),
+      mappingType: resolved.mappingType,
+      entityId: resolved.entityId,
+    };
+  }
+
+  return {
+    ok: true,
+    skuCode: picked.skuCode,
+    availableQuantity: picked.availableQuantity,
+    productName: resolved.productName,
+    requiredQuantity,
+    source: "auto_inventory",
+    mappingType: resolved.mappingType,
+    entityId: resolved.entityId,
+  };
+}
+
 function normalizeSizeKey(value) {
   const raw = String(value ?? "").trim();
   if (!raw) return "";
@@ -611,8 +867,12 @@ function pickAvailableSkuFromCandidates(skus, requiredQty, inventoryMap) {
 
 function buildInventoryUnavailableError(unavailableProducts) {
   const names = unavailableProducts.map((p) => p.productName).filter(Boolean);
-  const messageAr =
-    names.length === 1
+  const hasInvalidSku = unavailableProducts.some(
+    (p) => p.reason === "invalid_selected_sku",
+  );
+  const messageAr = hasInvalidSku
+    ? `الـ SKU المختار غير صالح للمنتج (${names.join("، ")})`
+    : names.length === 1
       ? `المنتج (${names[0]}) غير متوفر في المخزن`
       : `المنتجات (${names.join("، ")}) غير متوفرة في المخزن`;
 
@@ -639,46 +899,30 @@ async function resolveMappedBostaSkuForLine(
     1,
     Number(line?.quantity ?? line?.variant?.quantity ?? 1) || 1,
   );
-  const resolved = resolveMappedSkuCandidatesForLine(line, data);
 
-  if (!resolved.skus.length) {
-    throw buildInventoryUnavailableError([
-      {
-        productName: resolved.productName,
-        requiredQuantity: requiredQty,
-        candidateSkus: [],
-        availableQuantity: 0,
-        mappingType: resolved.mappingType,
-        entityId: resolved.entityId,
-        reason: "no_sku_mapping",
-      },
-    ]);
-  }
-
-  const picked = pickAvailableSkuFromCandidates(
-    resolved.skus,
-    requiredQty,
+  const lineResult = resolveLineSkuForBosta(
+    line,
+    data,
     inventory,
+    requiredQty,
   );
 
-  if (!picked) {
+  if (!lineResult.ok) {
     throw buildInventoryUnavailableError([
       {
-        productName: resolved.productName,
-        requiredQuantity: requiredQty,
-        candidateSkus: resolved.skus,
-        availableQuantity: Math.max(
-          ...resolved.skus.map((sku) => Number(inventory.get(sku) || 0)),
-          0,
-        ),
-        mappingType: resolved.mappingType,
-        entityId: resolved.entityId,
-        reason: "out_of_stock",
+        productName: lineResult.productName,
+        requiredQuantity: lineResult.requiredQuantity,
+        candidateSkus: lineResult.candidateSkus || [],
+        availableQuantity: lineResult.availableQuantity ?? 0,
+        selectedSku: lineResult.selectedSku || null,
+        mappingType: lineResult.mappingType,
+        entityId: lineResult.entityId,
+        reason: lineResult.reason,
       },
     ]);
   }
 
-  return picked.skuCode;
+  return lineResult.skuCode;
 }
 
 async function validateOrderLinesInventory(localOrder) {
@@ -702,49 +946,29 @@ async function validateOrderLinesInventory(localOrder) {
   for (let index = 0; index < cartLines.length; index += 1) {
     const line = cartLines[index];
     const requiredQty = Math.max(1, Number(line?.quantity) || 1);
-    const resolved = resolveMappedSkuCandidatesForLine(line, maps);
+    const lineResult = resolveLineSkuForBosta(line, maps, inventoryMap, requiredQty);
 
-    if (!resolved.skus.length) {
+    if (!lineResult.ok) {
       unavailableProducts.push({
-        productName: resolved.productName,
-        requiredQuantity: requiredQty,
-        candidateSkus: [],
-        availableQuantity: 0,
-        mappingType: resolved.mappingType,
-        entityId: resolved.entityId,
-        reason: "no_sku_mapping",
-      });
-      continue;
-    }
-
-    const picked = pickAvailableSkuFromCandidates(
-      resolved.skus,
-      requiredQty,
-      inventoryMap,
-    );
-
-    if (!picked) {
-      unavailableProducts.push({
-        productName: resolved.productName,
-        requiredQuantity: requiredQty,
-        candidateSkus: resolved.skus,
-        availableQuantity: Math.max(
-          ...resolved.skus.map((sku) => Number(inventoryMap.get(sku) || 0)),
-          0,
-        ),
-        mappingType: resolved.mappingType,
-        entityId: resolved.entityId,
-        reason: "out_of_stock",
+        productName: lineResult.productName,
+        requiredQuantity: lineResult.requiredQuantity,
+        candidateSkus: lineResult.candidateSkus || [],
+        availableQuantity: lineResult.availableQuantity ?? 0,
+        selectedSku: lineResult.selectedSku || null,
+        mappingType: lineResult.mappingType,
+        entityId: lineResult.entityId,
+        reason: lineResult.reason,
       });
       continue;
     }
 
     items.push({
       lineIndex: index,
-      skuCode: picked.skuCode,
-      availableQuantity: picked.availableQuantity,
-      productName: resolved.productName,
-      requiredQuantity: requiredQty,
+      skuCode: lineResult.skuCode,
+      availableQuantity: lineResult.availableQuantity,
+      productName: lineResult.productName,
+      requiredQuantity: lineResult.requiredQuantity,
+      source: lineResult.source,
     });
   }
 
@@ -958,6 +1182,10 @@ module.exports = {
   deleteUnmappedProduct,
   importBostaSkuMappings,
   getBostaSkuOptionsForProduct,
+  pickLineSelectedBostaSku,
+  parseLineSkuOverrides,
+  applyLineSkuOverridesToOrder,
+  normalizeCartItemsBostaFields,
   resolveMappedSkuCandidatesForLine,
   resolveMappedBostaSkuForLine,
   validateOrderLinesInventory,

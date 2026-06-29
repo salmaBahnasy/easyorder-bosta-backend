@@ -204,6 +204,47 @@ function syncCustomerPhoneAliases(rawData) {
   return rawData;
 }
 
+function syncOrderCartItemsBostaFields(rawData) {
+  if (!rawData || typeof rawData !== "object") return rawData;
+  const { normalizeCartItemsBostaFields } = require("./bostaSkuMappings.service");
+
+  if (Array.isArray(rawData.cart_items)) {
+    rawData.cart_items = normalizeCartItemsBostaFields(rawData.cart_items);
+  }
+  if (Array.isArray(rawData.cartItems)) {
+    rawData.cartItems = normalizeCartItemsBostaFields(rawData.cartItems);
+  }
+
+  return rawData;
+}
+
+function syncBostaLocationAliases(rawData) {
+  if (!rawData || typeof rawData !== "object") return rawData;
+
+  const cityId = String(
+    rawData.bosta_city_id ?? rawData.bostaCityId ?? rawData.cityId ?? "",
+  ).trim();
+  if (cityId) {
+    rawData.bosta_city_id = cityId;
+    rawData.bostaCityId = cityId;
+    rawData.cityId = cityId;
+  }
+
+  const districtId = String(
+    rawData.bosta_district_id ??
+      rawData.bostaDistrictId ??
+      rawData.districtId ??
+      "",
+  ).trim();
+  if (districtId) {
+    rawData.bosta_district_id = districtId;
+    rawData.bostaDistrictId = districtId;
+    rawData.districtId = districtId;
+  }
+
+  return rawData;
+}
+
 const ORDER_STATUS_OPTIONS = [
   { value: "new", labelAr: "جديد" },
   { value: "Confirmed", labelAr: "مؤكد" },
@@ -1176,6 +1217,8 @@ async function addWebhookOrder(order, options = {}) {
   raw_data.orderType = raw_data.order_type;
   syncCustomerPhoneAliases(raw_data);
   syncShippingStatusAliases(raw_data);
+  syncBostaLocationAliases(raw_data);
+  syncOrderCartItemsBostaFields(raw_data);
 
   if (actor?.id != null) {
     const idStr = String(actor.id).trim();
@@ -1793,6 +1836,8 @@ async function editOrder(orderId, updates, actor) {
   };
   syncCustomerPhoneAliases(mergedRawData);
   syncShippingStatusAliases(mergedRawData);
+  syncBostaLocationAliases(mergedRawData);
+  syncOrderCartItemsBostaFields(mergedRawData);
 
   if (changedBy) {
     mergedRawData.updated_by_employee_id = changedBy;

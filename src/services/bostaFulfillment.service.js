@@ -156,24 +156,35 @@ function mapLineToBostaItem(line, index, mappedSku = null) {
 }
 
 async function buildBostaItemsFromOrder(localOrder, overrides = {}) {
-  const { validateOrderLinesInventory } = require("./bostaSkuMappings.service");
+  const {
+    validateOrderLinesInventory,
+    applyLineSkuOverridesToOrder,
+  } = require("./bostaSkuMappings.service");
   const cartLines = parseCartItems(localOrder);
 
   if (!cartLines.length) {
     return [
       {
-        skuCode: firstNonEmpty(overrides.defaultSkuCode, "order-items"),
+        skuCode: firstNonEmpty(
+          overrides.defaultSkuCode,
+          overrides.lineSkuOverrides?.get?.(0),
+          "order-items",
+        ),
         quantity: 1,
         price: Number(pickOrderCodAmount(localOrder, overrides)) || 0,
       },
     ];
   }
 
+  const orderForSku = applyLineSkuOverridesToOrder(
+    localOrder,
+    overrides.lineSkuOverrides,
+  );
   const { items: resolvedItems } =
-    await validateOrderLinesInventory(localOrder);
+    await validateOrderLinesInventory(orderForSku);
 
   return resolvedItems.map((resolved, index) => {
-    const line = cartLines[resolved.lineIndex ?? index];
+    const line = parseCartItems(orderForSku)[resolved.lineIndex ?? index];
     return mapLineToBostaItem(line, index, resolved.skuCode);
   });
 }
