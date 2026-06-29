@@ -217,6 +217,51 @@ function buildValidationError(message, code = "BOSTA_ORDER_MAPPING_ERROR") {
   return err;
 }
 
+const BOSTA_MIN_FIRST_LINE_LENGTH = 10;
+
+function resolveShippingFirstLine(localOrder, overrides = {}) {
+  const parts = [
+    overrides.firstLine,
+    localOrder.address,
+    localOrder.firstLine,
+    localOrder.shipping_address,
+    localOrder.street,
+    localOrder.building,
+    localOrder.landmark,
+    localOrder.district,
+    localOrder.area,
+    localOrder.zone,
+    localOrder.neighborhood,
+    overrides.cityName,
+    localOrder.city,
+    localOrder.government,
+    localOrder.cityName,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  const firstLine = [...new Set(parts)].join("، ").trim();
+
+  if (!firstLine) {
+    throw buildValidationError(
+      "shipping address firstLine is required (عنوان الشحن مطلوب)",
+    );
+  }
+
+  if (firstLine.length >= BOSTA_MIN_FIRST_LINE_LENGTH) {
+    return firstLine;
+  }
+
+  throw buildValidationError(
+    `shipping address must be at least ${BOSTA_MIN_FIRST_LINE_LENGTH} characters (عنوان الشحن قصير جداً — أضيفي تفاصيل أكثر)`,
+  );
+}
+
+function resolveShipmentNote(localOrder, overrides = {}) {
+  const note = firstNonEmpty(overrides.note, localOrder.note, localOrder.notes);
+  return note || null;
+}
+
 /**
  * Map stored order (mapStoredOrderToClient shape) → Bosta fulfillment payload.
  */
@@ -251,15 +296,7 @@ async function mapLocalOrderToBostaPayload(localOrder, overrides = {}) {
     );
   }
 
-  const firstLine = firstNonEmpty(
-    overrides.firstLine,
-    localOrder.address,
-    localOrder.firstLine,
-    localOrder.shipping_address,
-  );
-  if (!firstLine) {
-    throw buildValidationError("shipping address firstLine is required");
-  }
+  const firstLine = resolveShippingFirstLine(localOrder, overrides);
 
   const districtId = firstNonEmpty(
     overrides.districtId,
@@ -293,14 +330,15 @@ async function mapLocalOrderToBostaPayload(localOrder, overrides = {}) {
     ...(districtId ? { districtId } : {}),
   };
 
+  const shipmentNote = resolveShipmentNote(localOrder, overrides);
+
   const payload = {
     orderAlias: String(orderAlias),
     items,
     shippingAddress,
     shipment: {
       codAmount: pickOrderCodAmount(localOrder, overrides),
-      note:
-        firstNonEmpty(overrides.note, localOrder.note, localOrder.notes) || "",
+      ...(shipmentNote ? { note: shipmentNote } : {}),
       allowToOpenPackage: Boolean(
         overrides.allowToOpenPackage ??
         localOrder.allow_to_open_package ??

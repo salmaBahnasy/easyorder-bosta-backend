@@ -1597,6 +1597,51 @@ async function getWebhookOrders({
   };
 }
 
+async function getWebhookOrdersForExport(filters, options = {}) {
+  const maxRows = Math.min(
+    Math.max(1, Number(options.maxRows) || 10000),
+    20000,
+  );
+  const pageSize = Math.min(
+    Math.max(100, Number(options.pageSize) || 500),
+    1000,
+  );
+
+  const all = [];
+  let total = 0;
+  let page = 1;
+
+  for (;;) {
+    const batch = await getWebhookOrders({
+      ...filters,
+      page,
+      limit: pageSize,
+    });
+
+    total = batch.total;
+    all.push(...batch.data);
+
+    if (
+      batch.data.length < pageSize ||
+      all.length >= total ||
+      all.length >= maxRows
+    ) {
+      break;
+    }
+
+    page += 1;
+    if (page > 500) break;
+  }
+
+  const exported = Math.min(all.length, maxRows);
+  return {
+    data: all.slice(0, maxRows),
+    total,
+    exported,
+    truncated: total > exported,
+  };
+}
+
 async function updateOrderStatus(orderId, status, changedBy) {
   if (!ALLOWED_ORDER_STATUSES.includes(status)) {
     const error = new Error("Invalid status value");
@@ -3884,6 +3929,7 @@ function parseExpenseForCostChart(raw) {
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
+  getWebhookOrdersForExport,
   getWebhookOrderByReference,
   getWebhookOrderById,
   findOrderByBostaAlias,

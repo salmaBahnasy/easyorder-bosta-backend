@@ -2,6 +2,7 @@ const easyorderService = require("../services/easyorder.service");
 const {
   addWebhookOrder,
   getWebhookOrders,
+  getWebhookOrdersForExport,
   updateOrderStatus,
   editOrder,
   getOrdersStatistics,
@@ -30,6 +31,7 @@ const {
   saveOrderCostDailyEntry,
   getOrderCostChartFromStorage,
 } = require("../services/orderCostDaily.service");
+const { buildOrdersExcelBuffer } = require("../services/ordersExport.service");
 
 /** مثال لجسم POST /api/orders — الحقول الاختيارية: order_source (افتراضي store)، order_type (افتراضي new)، shipping_status (افتراضي in_progress)، status (افتراضي new). */
 const POST_ORDER_MANUAL_EXAMPLE = {
@@ -256,148 +258,178 @@ function resolveOrderCostChartDateRange(req) {
   return resolveOrdersTrendDateRange(req);
 }
 
+function buildOrdersListFilters(req, pagination = {}) {
+  const page = Number(pagination.page ?? req.query.page) || 1;
+  const limit = Number(pagination.limit ?? req.query.limit) || 50;
+
+  const { from, to } = resolveOrdersListDateRange(req);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    const err = new Error("Invalid from or to date");
+    err.code = "INVALID_DATE_RANGE";
+    throw err;
+  }
+
+  const status = optionalQueryParam(req.query.status);
+  const employeeId = optionalQueryParam(
+    req.query.employeeId || req.query.employee_id || req.query.userId,
+  );
+  const order_source = optionalQueryParam(
+    req.query.order_source || req.query.orderSource,
+  );
+  const order_type = optionalQueryParam(
+    req.query.order_type || req.query.orderType,
+  );
+  const shipping_status = optionalQueryParam(
+    req.query.shipping_status || req.query.shippingStatus,
+  );
+  const easyorder_id = optionalQueryParam(
+    req.query.easyorder_id || req.query.easyorderId,
+  );
+  const product_id =
+    optionalQueryParam(req.query.product_id || req.query.productId) ||
+    easyorder_id;
+  const product_sku = optionalQueryParam(
+    req.query.product_sku || req.query.productSku,
+  );
+  const phone = optionalQueryParam(
+    req.query.phone ||
+      req.query.mobile ||
+      req.query.customerPhone ||
+      req.query.customer_phone,
+  );
+  const customer_name = optionalQueryParam(
+    req.query.customer_name ||
+      req.query.customerName ||
+      req.query.full_name ||
+      req.query.fullName ||
+      req.query.name,
+  );
+  const employee_scope = optionalQueryParam(
+    req.query.employee_scope || req.query.employeeScope,
+  );
+  const ignoreEmployeeLogDateRange =
+    employee_scope === "all" ||
+    employee_scope === "any" ||
+    employee_scope === "all_time";
+
+  if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
+    const err = new Error("Invalid status filter");
+    err.code = "INVALID_STATUS";
+    throw err;
+  }
+
+  if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
+    const err = new Error("Invalid order_source filter");
+    err.code = "INVALID_ORDER_SOURCE";
+    throw err;
+  }
+
+  if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
+    const err = new Error("Invalid order_type filter");
+    err.code = "INVALID_ORDER_TYPE";
+    throw err;
+  }
+
+  if (
+    shipping_status &&
+    !SHIPPING_STATUSES.includes(String(shipping_status).trim())
+  ) {
+    const err = new Error("Invalid shipping_status filter");
+    err.code = "INVALID_SHIPPING_STATUS";
+    throw err;
+  }
+
+  const filters = {
+    page,
+    limit,
+    from,
+    to,
+    status,
+    employeeId,
+    order_source,
+    order_type,
+    shipping_status,
+    product_id,
+    product_sku,
+    phone,
+    customer_name,
+    ignoreEmployeeLogDateRange,
+  };
+
+  const appliedFilters = {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    status,
+    employeeId,
+    employee_id: employeeId,
+    employee_scope: employee_scope || undefined,
+    ignoreEmployeeLogDateRange: ignoreEmployeeLogDateRange || undefined,
+    order_source,
+    order_type,
+    shipping_status,
+    product_id,
+    easyorder_id: easyorder_id || undefined,
+    product_sku,
+    phone,
+    customer_name,
+    page,
+    limit,
+  };
+
+  return { filters, appliedFilters, employee_scope };
+}
+
 async function getOrders(req, res) {
   try {
-    const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 50;
-
-    let from;
-    let to;
+    let filters;
+    let appliedFilters;
     try {
-      ({ from, to } = resolveOrdersListDateRange(req));
+      ({ filters, appliedFilters } = buildOrdersListFilters(req));
     } catch (error) {
       if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
         res.status(400).json({ success: false, message: error.message });
         return;
       }
+      if (error.code === "INVALID_DATE_RANGE") {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      if (error.code === "INVALID_STATUS") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedStatuses: ALLOWED_ORDER_STATUSES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_ORDER_SOURCE") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedOrderSources: ORDER_SOURCES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_ORDER_TYPE") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedOrderTypes: ORDER_TYPES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_SHIPPING_STATUS") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedShippingStatuses: SHIPPING_STATUSES,
+        });
+        return;
+      }
       throw error;
     }
 
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
-      res
-        .status(400)
-        .json({ success: false, message: "Invalid from or to date" });
-      return;
-    }
-
-    const status = optionalQueryParam(req.query.status);
-    const employeeId = optionalQueryParam(
-      req.query.employeeId || req.query.employee_id || req.query.userId,
-    );
-    const order_source = optionalQueryParam(
-      req.query.order_source || req.query.orderSource,
-    );
-    const order_type = optionalQueryParam(
-      req.query.order_type || req.query.orderType,
-    );
-    const shipping_status = optionalQueryParam(
-      req.query.shipping_status || req.query.shippingStatus,
-    );
-    const easyorder_id = optionalQueryParam(
-      req.query.easyorder_id || req.query.easyorderId,
-    );
-    const product_id =
-      optionalQueryParam(req.query.product_id || req.query.productId) ||
-      easyorder_id;
-    const product_sku = optionalQueryParam(
-      req.query.product_sku || req.query.productSku,
-    );
-    const phone = optionalQueryParam(
-      req.query.phone ||
-        req.query.mobile ||
-        req.query.customerPhone ||
-        req.query.customer_phone,
-    );
-    const customer_name = optionalQueryParam(
-      req.query.customer_name ||
-        req.query.customerName ||
-        req.query.full_name ||
-        req.query.fullName ||
-        req.query.name,
-    );
-    const employee_scope = optionalQueryParam(
-      req.query.employee_scope || req.query.employeeScope,
-    );
-    const ignoreEmployeeLogDateRange =
-      employee_scope === "all" ||
-      employee_scope === "any" ||
-      employee_scope === "all_time";
-
-    if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid status filter",
-        allowedStatuses: ALLOWED_ORDER_STATUSES,
-      });
-      return;
-    }
-
-    if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid order_source filter",
-        allowedOrderSources: ORDER_SOURCES,
-      });
-      return;
-    }
-
-    if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid order_type filter",
-        allowedOrderTypes: ORDER_TYPES,
-      });
-      return;
-    }
-
-    if (
-      shipping_status &&
-      !SHIPPING_STATUSES.includes(String(shipping_status).trim())
-    ) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid shipping_status filter",
-        allowedShippingStatuses: SHIPPING_STATUSES,
-      });
-      return;
-    }
-
-    const result = await getWebhookOrders({
-      page,
-      limit,
-      from,
-      to,
-      status,
-      employeeId,
-      order_source,
-      order_type,
-      shipping_status,
-      product_id,
-      product_sku,
-      phone,
-      customer_name,
-      ignoreEmployeeLogDateRange,
-    });
-
-    const appliedFilters = {
-      from: from.toISOString(),
-      to: to.toISOString(),
-      status,
-      employeeId,
-      employee_id: employeeId,
-      employee_scope: employee_scope || undefined,
-      ignoreEmployeeLogDateRange: ignoreEmployeeLogDateRange || undefined,
-      order_source,
-      order_type,
-      shipping_status,
-      product_id,
-      easyorder_id: easyorder_id || undefined,
-      product_sku,
-      phone,
-      customer_name,
-      page,
-      limit,
-    };
+    const result = await getWebhookOrders(filters);
 
     res.json({
       success: true,
@@ -417,6 +449,94 @@ async function getOrders(req, res) {
     res.status(500).json({
       success: false,
       message: "Failed to fetch orders",
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * GET /api/orders/export
+ * GET /api/easyorder/orders/export
+ * Same query filters as GET /orders — returns Excel (.xlsx).
+ */
+async function exportOrders(req, res) {
+  try {
+    let filters;
+    try {
+      ({ filters } = buildOrdersListFilters(req));
+    } catch (error) {
+      if (
+        error.code === "INVALID_FROM" ||
+        error.code === "INVALID_TO" ||
+        error.code === "INVALID_DATE_RANGE"
+      ) {
+        res.status(400).json({ success: false, message: error.message });
+        return;
+      }
+      if (error.code === "INVALID_STATUS") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedStatuses: ALLOWED_ORDER_STATUSES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_ORDER_SOURCE") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedOrderSources: ORDER_SOURCES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_ORDER_TYPE") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedOrderTypes: ORDER_TYPES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_SHIPPING_STATUS") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedShippingStatuses: SHIPPING_STATUSES,
+        });
+        return;
+      }
+      throw error;
+    }
+
+    const maxRows = Math.min(
+      Math.max(1, Number(req.query.maxRows ?? req.query.max_rows) || 10000),
+      20000,
+    );
+
+    const exportResult = await getWebhookOrdersForExport(filters, { maxRows });
+    const buffer = buildOrdersExcelBuffer(exportResult.data);
+    const dateKey = getEgyptCalendarDateKey(new Date()) || "export";
+    const filename = `orders-${dateKey}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`,
+    );
+    res.setHeader("X-Export-Total", String(exportResult.total));
+    res.setHeader("X-Export-Rows", String(exportResult.exported));
+    if (exportResult.truncated) {
+      res.setHeader("X-Export-Truncated", "true");
+    }
+
+    res.send(buffer);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to export orders",
       error: error.message,
     });
   }
@@ -1437,6 +1557,7 @@ module.exports = {
   createOrder,
   updateOrder,
   getOrders,
+  exportOrders,
   getOrderByReference,
   changeOrderStatus,
   getEasyOrderDetails,
