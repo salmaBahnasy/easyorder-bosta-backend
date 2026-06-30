@@ -1303,9 +1303,6 @@ async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
   let nextStatus = existingOrder.status;
   if (options.status && ALLOWED_ORDER_STATUSES.includes(options.status)) {
     nextStatus = options.status;
-    mergedRawData.status = nextStatus;
-    mergedRawData.orderStatus = nextStatus;
-    mergedRawData.order_status = nextStatus;
   }
 
   const { data, error } = await supabase
@@ -1326,7 +1323,11 @@ async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
 }
 
 async function markOrderSentToBosta(orderId, bostaResult, bostaPayload) {
-  const bostaId = extractBostaFulfillmentId(bostaResult);
+  const bostaId =
+    bostaResult?.id ??
+    bostaResult?.data?.id ??
+    bostaResult?.orderId ??
+    null;
 
   return mergeOrderRawDataPatch(
     orderId,
@@ -1336,28 +1337,11 @@ async function markOrderSentToBosta(orderId, bostaResult, bostaPayload) {
       bosta_order_alias: bostaPayload?.orderAlias ?? null,
       bosta_sent_at: new Date().toISOString(),
       bosta_last_payload: bostaPayload ?? null,
-      bosta_last_response: bostaResult ?? null,
       shipping_status: "in_progress",
       shippingStatus: "in_progress",
     },
     { status: "Shipped" },
   );
-}
-
-function extractBostaFulfillmentId(result) {
-  const candidates = [
-    result?.id,
-    result?.data?.id,
-    result?.orderId,
-    result?.data?.orderId,
-    result?.data?.order?.id,
-  ];
-  for (const candidate of candidates) {
-    if (candidate != null && String(candidate).trim() !== "") {
-      return String(candidate).trim();
-    }
-  }
-  return null;
 }
 
 function mapBostaStatusToShippingStatus(status) {
@@ -1411,22 +1395,10 @@ async function applyBostaFulfillmentWebhook(payload) {
   const nextOrderStatus = mapBostaStatusToOrderStatus(payload?.status);
   const previousStatus = order.status;
 
-  const bostaId =
-    payload?.id ?? payload?.orderId ?? payload?.order_id ?? null;
-  const bostaIdStr =
-    bostaId != null && String(bostaId).trim() !== ""
-      ? String(bostaId).trim()
-      : null;
-
   const updatedOrder = await mergeOrderRawDataPatch(
     order.sourceOrderId,
     {
-      ...(bostaIdStr
-        ? {
-            bosta_order_id: bostaIdStr,
-            bosta_fulfillment_id: bostaIdStr,
-          }
-        : {}),
+      bosta_order_id: payload?.id ?? null,
       bosta_status: payload?.status ?? null,
       bosta_tracking_number: payload?.trackingNumber ?? null,
       bosta_type: payload?.type ?? null,

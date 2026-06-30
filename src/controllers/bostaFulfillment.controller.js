@@ -276,10 +276,7 @@ async function handleBostaOrderStatusWebhook(req, res) {
         req.get("x-bosta-secret") ||
         req.get("x-webhook-secret") ||
         req.query.secret;
-      const incomingSecret = String(incoming || "").trim();
-      // Bosta calls the URL registered at send time (often without ?secret=).
-      // Reject only when a wrong secret is sent; missing secret is allowed.
-      if (incomingSecret && incomingSecret !== secret) {
+      if (String(incoming || "").trim() !== secret) {
         res.status(401).json({ success: false, message: "Unauthorized webhook" });
         return;
       }
