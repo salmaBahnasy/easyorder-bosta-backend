@@ -549,6 +549,7 @@ module.exports = {
   PLATFORM,
   DEFAULT_ORDER_TYPE,
   getWebhookUrl,
+  firstNonEmpty,
   mapLocalOrderToBostaPayload,
   mapBostaStatusToShippingStatus,
   createFulfillmentOrder,
