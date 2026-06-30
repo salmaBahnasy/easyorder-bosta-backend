@@ -283,10 +283,17 @@ async function handleBostaOrderStatusWebhook(req, res) {
     }
 
     const payload = req.body || {};
-    if (!payload.orderAlias) {
+    if (
+      !payload.orderAlias &&
+      !payload.order_alias &&
+      !payload.id &&
+      !payload.orderId &&
+      !payload.order_id
+    ) {
       res.status(400).json({
         success: false,
-        message: "orderAlias is required in webhook payload",
+        message:
+          "orderAlias or Bosta order id is required in webhook payload",
       });
       return;
     }

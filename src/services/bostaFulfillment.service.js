@@ -1,5 +1,6 @@
 const axios = require("axios");
 const { bosta } = require("../config/env");
+const { isInstapayPaymentMethod } = require("../utils/paymentMethod");
 
 const PLATFORM = "custom_api";
 const DEFAULT_ORDER_TYPE = "FORWARD";
@@ -13,25 +14,36 @@ function getFulfillmentBaseUrl() {
 
 function getWebhookUrl() {
   const explicit = (process.env.BOSTA_WEBHOOK_URL || "").trim();
-  if (explicit) return explicit;
+  let url;
+  if (explicit) {
+    url = explicit;
+  } else {
+    const base = (
+      process.env.APP_PUBLIC_BASE_URL ||
+      process.env.PUBLIC_BASE_URL ||
+      ""
+    )
+      .trim()
+      .replace(/\/$/, "");
 
-  const base = (
-    process.env.APP_PUBLIC_BASE_URL ||
-    process.env.PUBLIC_BASE_URL ||
-    ""
-  )
-    .trim()
-    .replace(/\/$/, "");
+    if (!base) {
+      const err = new Error(
+        "Set BOSTA_WEBHOOK_URL or APP_PUBLIC_BASE_URL for Bosta webhook callbacks",
+      );
+      err.code = "BOSTA_WEBHOOK_URL_MISSING";
+      throw err;
+    }
 
-  if (!base) {
-    const err = new Error(
-      "Set BOSTA_WEBHOOK_URL or APP_PUBLIC_BASE_URL for Bosta webhook callbacks",
-    );
-    err.code = "BOSTA_WEBHOOK_URL_MISSING";
-    throw err;
+    url = `${base}/webhooks/bosta/order-status`;
   }
 
-  return `${base}/webhooks/bosta/order-status`;
+  const secret = (process.env.BOSTA_WEBHOOK_SECRET || "").trim();
+  if (secret && !/[?&]secret=/.test(url)) {
+    const sep = url.includes("?") ? "&" : "?";
+    url = `${url}${sep}secret=${encodeURIComponent(secret)}`;
+  }
+
+  return url;
 }
 
 function normalizeFulfillmentApiKey(apiKey) {
@@ -191,15 +203,6 @@ async function buildBostaItemsFromOrder(localOrder, overrides = {}) {
 
 function resolvePaymentMethod(raw) {
   return firstNonEmpty(raw?.payment_method, raw?.paymentMethod);
-}
-
-/** مدفوع مسبقاً على Bosta فقط عند instapay؛ غير ذلك تحصيل (COD) */
-function isInstapayPaymentMethod(paymentMethod) {
-  const m = String(paymentMethod || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s_-]+/g, "");
-  return m === "instapay";
 }
 
 function pickOrderCodAmount(raw, overrides = {}) {

@@ -13,6 +13,7 @@ const {
   applyOrderReferenceToRawData,
   allocateNextOrderReference,
 } = require("../utils/orderReference");
+const { normalizePaymentMethod } = require("../utils/paymentMethod");
 
 const ALLOWED_ORDER_STATUSES = [
   "canceled",
@@ -179,7 +180,7 @@ function syncPaymentMethodAliases(rawData) {
     (entry) => entry != null && String(entry).trim() !== "",
   );
   if (!value) return rawData;
-  const normalized = String(value).trim();
+  const normalized = normalizePaymentMethod(value);
   rawData.payment_method = normalized;
   rawData.paymentMethod = normalized;
   return rawData;
@@ -1215,6 +1216,63 @@ async function findOrderByBostaAlias(orderAlias) {
   return mapStoredOrderToClient(rows[0]);
 }
 
+async function findOrderByBostaOrderId(bostaOrderId) {
+  const id = String(bostaOrderId || "").trim();
+  if (!id) return null;
+
+  const escaped = id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const { data: rows, error } = await supabase
+    .from(ORDERS_TABLE)
+    .select("*")
+    .or(
+      [
+        `raw_data->>bosta_order_id.eq.${escaped}`,
+        `raw_data->>bosta_fulfillment_id.eq.${escaped}`,
+      ].join(","),
+    )
+    .limit(2);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!rows?.length) return null;
+  if (rows.length > 1) {
+    const ambiguous = new Error("Multiple orders match this Bosta order id");
+    ambiguous.code = "ORDER_REFERENCE_AMBIGUOUS";
+    throw ambiguous;
+  }
+
+  return mapStoredOrderToClient(rows[0]);
+}
+
+async function findOrderForBostaWebhook(payload) {
+  const alias = payload?.orderAlias ?? payload?.order_alias;
+  if (alias != null && String(alias).trim() !== "") {
+    try {
+      return await findOrderByBostaAlias(alias);
+    } catch (error) {
+      if (
+        error.code !== "ORDER_NOT_FOUND" &&
+        error.code !== "ORDER_REFERENCE_AMBIGUOUS"
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  const bostaId = [payload?.id, payload?.orderId, payload?.order_id].find(
+    (entry) => entry != null && String(entry).trim() !== "",
+  );
+  if (bostaId) {
+    const order = await findOrderByBostaOrderId(bostaId);
+    if (order) return order;
+  }
+
+  const notFound = new Error("Order not found");
+  notFound.code = "ORDER_NOT_FOUND";
+  throw notFound;
+}
+
 async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
   const id = String(orderId || "").trim();
   if (!id) {
@@ -1313,20 +1371,60 @@ function mapBostaStatusToShippingStatus(status) {
   return "in_progress";
 }
 
-async function applyBostaFulfillmentWebhook(payload) {
-  const order = await findOrderByBostaAlias(payload?.orderAlias);
-  const shippingStatus = mapBostaStatusToShippingStatus(payload?.status);
+function mapBostaStatusToOrderStatus(status) {
+  const key = String(status || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_");
 
-  return mergeOrderRawDataPatch(order.sourceOrderId, {
-    bosta_order_id: payload?.id ?? null,
-    bosta_status: payload?.status ?? null,
-    bosta_tracking_number: payload?.trackingNumber ?? null,
-    bosta_type: payload?.type ?? null,
-    bosta_failure_reason: payload?.reason ?? null,
-    bosta_last_webhook_at: new Date().toISOString(),
-    shipping_status: shippingStatus,
-    shippingStatus,
-  });
+  if (
+    key.includes("cancel") ||
+    key === "terminated" ||
+    key === "deleted" ||
+    key === "void"
+  ) {
+    return "canceled";
+  }
+
+  return null;
+}
+
+async function applyBostaFulfillmentWebhook(payload) {
+  const order = await findOrderForBostaWebhook(payload);
+  const shippingStatus = mapBostaStatusToShippingStatus(payload?.status);
+  const nextOrderStatus = mapBostaStatusToOrderStatus(payload?.status);
+  const previousStatus = order.status;
+
+  const updatedOrder = await mergeOrderRawDataPatch(
+    order.sourceOrderId,
+    {
+      bosta_order_id: payload?.id ?? null,
+      bosta_status: payload?.status ?? null,
+      bosta_tracking_number: payload?.trackingNumber ?? null,
+      bosta_type: payload?.type ?? null,
+      bosta_failure_reason: payload?.reason ?? null,
+      bosta_last_webhook_at: new Date().toISOString(),
+      bosta_last_webhook_payload: payload ?? null,
+      shipping_status: shippingStatus,
+      shippingStatus,
+    },
+    nextOrderStatus ? { status: nextOrderStatus } : {},
+  );
+
+  if (nextOrderStatus && previousStatus !== nextOrderStatus) {
+    try {
+      await insertOrderStatusLog({
+        orderId: order.sourceOrderId,
+        oldStatus: previousStatus,
+        newStatus: nextOrderStatus,
+        changedBy: "bosta_webhook",
+      });
+    } catch {
+      // status log is best-effort for automated Bosta updates
+    }
+  }
+
+  return updatedOrder;
 }
 
 async function addWebhookOrder(order, options = {}) {
