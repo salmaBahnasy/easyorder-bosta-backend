@@ -173,6 +173,18 @@ function syncShippingStatusAliases(rawData) {
   return rawData;
 }
 
+function syncPaymentMethodAliases(rawData) {
+  if (!rawData || typeof rawData !== "object") return rawData;
+  const value = [rawData.payment_method, rawData.paymentMethod].find(
+    (entry) => entry != null && String(entry).trim() !== "",
+  );
+  if (!value) return rawData;
+  const normalized = String(value).trim();
+  rawData.payment_method = normalized;
+  rawData.paymentMethod = normalized;
+  return rawData;
+}
+
 /** phone/mobile و phone2/phone_2/secondaryPhone — نفس القيمة في كل المفاتيح */
 function syncCustomerPhoneAliases(rawData) {
   if (!rawData || typeof rawData !== "object") return rawData;
@@ -1061,6 +1073,7 @@ function mapStoredOrderToClient(row) {
       : {};
   syncShippingStatusAliases(raw);
   syncCustomerPhoneAliases(raw);
+  syncPaymentMethodAliases(raw);
   return {
     ...raw,
     sourceOrderId: row.order_id,
@@ -1331,6 +1344,7 @@ async function addWebhookOrder(order, options = {}) {
   raw_data.orderType = raw_data.order_type;
   syncCustomerPhoneAliases(raw_data);
   syncShippingStatusAliases(raw_data);
+  syncPaymentMethodAliases(raw_data);
   syncBostaLocationAliases(raw_data);
   syncOrderCartItemsBostaFields(raw_data);
 
@@ -2061,6 +2075,7 @@ async function editOrder(orderId, updates, actor) {
   };
   syncCustomerPhoneAliases(mergedRawData);
   syncShippingStatusAliases(mergedRawData);
+  syncPaymentMethodAliases(mergedRawData);
   syncBostaLocationAliases(mergedRawData);
   syncOrderCartItemsBostaFields(mergedRawData);
 

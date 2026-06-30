@@ -189,6 +189,19 @@ async function buildBostaItemsFromOrder(localOrder, overrides = {}) {
   });
 }
 
+function resolvePaymentMethod(raw) {
+  return firstNonEmpty(raw?.payment_method, raw?.paymentMethod);
+}
+
+/** مدفوع مسبقاً على Bosta فقط عند instapay؛ غير ذلك تحصيل (COD) */
+function isInstapayPaymentMethod(paymentMethod) {
+  const m = String(paymentMethod || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_-]+/g, "");
+  return m === "instapay";
+}
+
 function pickOrderCodAmount(raw, overrides = {}) {
   if (
     overrides.codAmount != null &&
@@ -196,6 +209,16 @@ function pickOrderCodAmount(raw, overrides = {}) {
   ) {
     return String(overrides.codAmount);
   }
+
+  const paymentMethod = firstNonEmpty(
+    overrides.paymentMethod,
+    overrides.payment_method,
+    resolvePaymentMethod(raw),
+  );
+  if (isInstapayPaymentMethod(paymentMethod)) {
+    return "0";
+  }
+
   const candidates = [
     raw?.total_cost,
     raw?.totalCost,

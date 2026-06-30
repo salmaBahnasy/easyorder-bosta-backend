@@ -24,6 +24,7 @@ function pickOverrides(body = {}) {
     cityName: src.cityName ?? src.city_name,
     firstLine: src.firstLine ?? src.first_line ?? src.address,
     codAmount: src.codAmount ?? src.cod_amount,
+    paymentMethod: src.paymentMethod ?? src.payment_method,
     note: note || undefined,
     allowToOpenPackage:
       src.allowToOpenPackage ?? src.allow_to_open_package ?? undefined,

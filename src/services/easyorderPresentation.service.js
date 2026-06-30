@@ -167,7 +167,10 @@ function toPresentation(payload) {
       shipping: order.shipping_cost,
       total: order.total_cost,
       expense: order.expense,
-      paymentMethod: order.payment_method,
+      paymentMethod: firstNonEmptyString(
+        order.payment_method,
+        order.paymentMethod,
+      ),
     },
     marketing: {
       utmSource: order.utm_source,
