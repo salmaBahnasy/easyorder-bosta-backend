@@ -112,16 +112,45 @@ function pickLineQuantity(line) {
   return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 1;
 }
 
+function roundMoney(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+
 function pickLineUnitPrice(line) {
   if (!line || typeof line !== "object") return 0;
   const product =
     line.product && typeof line.product === "object" ? line.product : {};
   const variant =
     line.variant && typeof line.variant === "object" ? line.variant : {};
+  const quantity = pickLineQuantity(line);
+
+  const lineTotalCandidates = [
+    line.line_total,
+    line.lineTotal,
+    line.total_price,
+    line.totalPrice,
+  ];
+  for (const candidate of lineTotalCandidates) {
+    const total = Number(candidate);
+    if (Number.isFinite(total) && total >= 0) {
+      return roundMoney(total / quantity);
+    }
+  }
+
   const candidates = [
+    line.final_price,
+    line.finalPrice,
+    line.discounted_price,
+    line.discountedPrice,
+    line.discounted_unit_price,
+    line.discountedUnitPrice,
     line.price,
     line.unit_price,
     line.unitPrice,
+    variant.final_price,
+    variant.finalPrice,
     variant.sale_price,
     variant.price,
     product.sale_price,
@@ -129,12 +158,81 @@ function pickLineUnitPrice(line) {
   ];
   for (const candidate of candidates) {
     const n = Number(candidate);
-    if (Number.isFinite(n) && n >= 0) return n;
+    if (Number.isFinite(n) && n >= 0) return roundMoney(n);
   }
   return 0;
 }
 
-function mapLineToBostaItem(line, index, mappedSku = null) {
+/** subtotal المنتجات بعد تعديل الموظف */
+function pickEmployeeEditedProductsSubtotal(raw) {
+  if (!raw || typeof raw !== "object") return null;
+
+  const shipping = Number(
+    firstNonEmpty(raw.shipping_cost, raw.shippingCost, raw.shipping),
+  );
+  const shippingAmount =
+    Number.isFinite(shipping) && shipping >= 0 ? shipping : 0;
+
+  const total = Number(
+    firstNonEmpty(raw.total_cost, raw.totalCost, raw.total),
+  );
+  let impliedFromTotal = null;
+  if (Number.isFinite(total) && total >= 0) {
+    impliedFromTotal = roundMoney(Math.max(0, total - shippingAmount));
+  }
+
+  const cost = Number(raw.cost);
+  const hasCost = Number.isFinite(cost) && cost >= 0;
+
+  if (hasCost && impliedFromTotal != null) {
+    // الموظف عدّل الإجمالي (خصم) من غير cost → نستخدم total_cost − shipping
+    if (impliedFromTotal < cost - 0.01) return impliedFromTotal;
+    return roundMoney(cost);
+  }
+  if (hasCost) return roundMoney(cost);
+  if (impliedFromTotal != null) return impliedFromTotal;
+
+  return null;
+}
+
+/**
+ * أسعار المنتجات المرسلة لبوسطا = السعر اللي عدّله الموظف (cost / total_cost)
+ * وليس سعر الكatalog القديم في cart_items.
+ */
+function resolveEmployeeEditedLineUnitPrices(localOrder, cartLines) {
+  if (!cartLines.length) return [];
+
+  const quantities = cartLines.map((line) => pickLineQuantity(line));
+  const linePrices = cartLines.map((line) => pickLineUnitPrice(line));
+  const linesSubtotal = linePrices.reduce(
+    (sum, price, index) => sum + price * quantities[index],
+    0,
+  );
+
+  const editedSubtotal = pickEmployeeEditedProductsSubtotal(localOrder);
+
+  if (editedSubtotal == null) {
+    return linePrices;
+  }
+
+  if (cartLines.length === 1) {
+    return [roundMoney(editedSubtotal / quantities[0])];
+  }
+
+  if (linesSubtotal > 0 && Math.abs(linesSubtotal - editedSubtotal) < 0.01) {
+    return linePrices;
+  }
+
+  if (linesSubtotal <= 0) {
+    const even = roundMoney(editedSubtotal / quantities.reduce((a, b) => a + b, 0));
+    return quantities.map(() => even);
+  }
+
+  const factor = editedSubtotal / linesSubtotal;
+  return linePrices.map((price) => roundMoney(price * factor));
+}
+
+function mapLineToBostaItem(line, index, mappedSku = null, unitPriceOverride = null) {
   const product =
     line?.product && typeof line.product === "object" ? line.product : {};
   const variant =
@@ -163,7 +261,10 @@ function mapLineToBostaItem(line, index, mappedSku = null) {
   return {
     skuCode: String(skuCode),
     quantity: pickLineQuantity(line),
-    price: pickLineUnitPrice(line),
+    price:
+      unitPriceOverride != null && Number.isFinite(Number(unitPriceOverride))
+        ? roundMoney(unitPriceOverride)
+        : pickLineUnitPrice(line),
   };
 }
 
@@ -192,12 +293,23 @@ async function buildBostaItemsFromOrder(localOrder, overrides = {}) {
     localOrder,
     overrides.lineSkuOverrides,
   );
+  const cartForPricing = parseCartItems(orderForSku);
+  const discountedUnitPrices = resolveEmployeeEditedLineUnitPrices(
+    localOrder,
+    cartForPricing,
+  );
   const { items: resolvedItems } =
     await validateOrderLinesInventory(orderForSku);
 
   return resolvedItems.map((resolved, index) => {
-    const line = parseCartItems(orderForSku)[resolved.lineIndex ?? index];
-    return mapLineToBostaItem(line, index, resolved.skuCode);
+    const lineIndex = resolved.lineIndex ?? index;
+    const line = cartForPricing[lineIndex];
+    return mapLineToBostaItem(
+      line,
+      lineIndex,
+      resolved.skuCode,
+      discountedUnitPrices[lineIndex],
+    );
   });
 }
 
