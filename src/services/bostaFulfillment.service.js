@@ -118,6 +118,23 @@ function roundMoney(value) {
   return Math.round(n * 100) / 100;
 }
 
+function pickUserEnteredLineUnitPrice(line, priceOverride) {
+  if (priceOverride != null && priceOverride !== "") {
+    const fromOverride = Number(priceOverride);
+    if (Number.isFinite(fromOverride) && fromOverride >= 0) {
+      return roundMoney(fromOverride);
+    }
+  }
+  if (!line || typeof line !== "object") return null;
+
+  const candidates = [line.price, line.unit_price, line.unitPrice];
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n) && n >= 0) return roundMoney(n);
+  }
+  return null;
+}
+
 function pickLineUnitPrice(line) {
   if (!line || typeof line !== "object") return 0;
   const product =
@@ -258,13 +275,17 @@ function mapLineToBostaItem(line, index, mappedSku = null, unitPriceOverride = n
     `item-${index + 1}`,
   );
 
+  const unitPrice = pickUserEnteredLineUnitPrice(line, unitPriceOverride);
+  if (unitPrice == null) {
+    const err = new Error(`سعر المنتج مطلوب للسطر ${index + 1}`);
+    err.statusCode = 400;
+    throw err;
+  }
+
   return {
     skuCode: String(skuCode),
     quantity: pickLineQuantity(line),
-    price:
-      unitPriceOverride != null && Number.isFinite(Number(unitPriceOverride))
-        ? roundMoney(unitPriceOverride)
-        : pickLineUnitPrice(line),
+    price: unitPrice,
   };
 }
 
@@ -292,23 +313,22 @@ async function buildBostaItemsFromOrder(localOrder, overrides = {}) {
   const orderForSku = applyLineSkuOverridesToOrder(
     localOrder,
     overrides.lineSkuOverrides,
+    overrides.linePriceOverrides,
   );
   const cartForPricing = parseCartItems(orderForSku);
-  const discountedUnitPrices = resolveEmployeeEditedLineUnitPrices(
-    localOrder,
-    cartForPricing,
-  );
+  const priceOverrides = overrides.linePriceOverrides;
   const { items: resolvedItems } =
     await validateOrderLinesInventory(orderForSku);
 
   return resolvedItems.map((resolved, index) => {
     const lineIndex = resolved.lineIndex ?? index;
     const line = cartForPricing[lineIndex];
+    const priceOverride = priceOverrides?.get?.(lineIndex);
     return mapLineToBostaItem(
       line,
       lineIndex,
       resolved.skuCode,
-      discountedUnitPrices[lineIndex],
+      priceOverride,
     );
   });
 }

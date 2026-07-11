@@ -547,13 +547,14 @@ function normalizeBostaSkuCode(value) {
 function parseLineSkuOverrides(body = {}) {
   const src =
     body?.overrides && typeof body.overrides === "object" ? body.overrides : body;
-  const byIndex = new Map();
+  const skuByIndex = new Map();
+  const priceByIndex = new Map();
 
   const rootSku = normalizeBostaSkuCode(
     src.skuCode ?? src.sku ?? src.bosta_sku ?? src.bostaSku,
   );
   if (rootSku) {
-    byIndex.set(0, rootSku);
+    skuByIndex.set(0, rootSku);
   }
 
   const listSources = [
@@ -573,7 +574,7 @@ function parseLineSkuOverrides(body = {}) {
 
       if (typeof entry === "string") {
         const sku = normalizeBostaSkuCode(entry);
-        if (sku) byIndex.set(i, sku);
+        if (sku) skuByIndex.set(i, sku);
         continue;
       }
 
@@ -582,6 +583,8 @@ function parseLineSkuOverrides(body = {}) {
       const lineIndex = Number(
         entry.lineIndex ?? entry.line_index ?? entry.index ?? i,
       );
+      if (!Number.isFinite(lineIndex) || lineIndex < 0) continue;
+
       const sku = normalizeBostaSkuCode(
         entry.skuCode ??
           entry.sku ??
@@ -589,18 +592,37 @@ function parseLineSkuOverrides(body = {}) {
           entry.bostaSku ??
           entry.bostaSkuCode,
       );
-      if (sku && Number.isFinite(lineIndex) && lineIndex >= 0) {
-        byIndex.set(lineIndex, sku);
+      if (sku) {
+        skuByIndex.set(lineIndex, sku);
+      }
+
+      const priceRaw = entry.price;
+      if (priceRaw != null && priceRaw !== "") {
+        const price = Number(priceRaw);
+        if (Number.isFinite(price) && price >= 0) {
+          priceByIndex.set(lineIndex, price);
+        }
       }
     }
   }
 
-  return byIndex;
+  return { skuByIndex, priceByIndex };
 }
 
-function applyLineSkuOverridesToOrder(localOrder, lineSkuOverrides) {
+function applyLineSkuOverridesToOrder(
+  localOrder,
+  lineSkuOverrides,
+  priceByIndex,
+) {
   if (!localOrder || typeof localOrder !== "object") return localOrder;
-  if (!lineSkuOverrides || !(lineSkuOverrides instanceof Map) || !lineSkuOverrides.size) {
+
+  const hasSkuOverrides =
+    lineSkuOverrides &&
+    lineSkuOverrides instanceof Map &&
+    lineSkuOverrides.size > 0;
+  const hasPriceOverrides =
+    priceByIndex && priceByIndex instanceof Map && priceByIndex.size > 0;
+  if (!hasSkuOverrides && !hasPriceOverrides) {
     return localOrder;
   }
 
@@ -612,21 +634,38 @@ function applyLineSkuOverridesToOrder(localOrder, lineSkuOverrides) {
   if (!cartKey) return localOrder;
 
   const lines = [...localOrder[cartKey]];
-  for (const [index, sku] of lineSkuOverrides.entries()) {
-    if (!lines[index] || typeof lines[index] !== "object") continue;
-    const line = { ...lines[index] };
-    const variant =
-      line.variant && typeof line.variant === "object"
-        ? { ...line.variant }
-        : {};
 
-    line.bosta_sku = sku;
-    line.bostaSku = sku;
-    line.skuCode = sku;
-    variant.sku = sku;
-    variant.bosta_sku = sku;
-    line.variant = variant;
-    lines[index] = line;
+  if (hasSkuOverrides) {
+    for (const [index, sku] of lineSkuOverrides.entries()) {
+      if (!lines[index] || typeof lines[index] !== "object") continue;
+      const line = { ...lines[index] };
+      const variant =
+        line.variant && typeof line.variant === "object"
+          ? { ...line.variant }
+          : {};
+
+      line.bosta_sku = sku;
+      line.bostaSku = sku;
+      line.skuCode = sku;
+      variant.sku = sku;
+      variant.bosta_sku = sku;
+      line.variant = variant;
+      lines[index] = line;
+    }
+  }
+
+  if (hasPriceOverrides) {
+    for (const [index, price] of priceByIndex.entries()) {
+      if (!lines[index] || typeof lines[index] !== "object") continue;
+      const line = { ...lines[index] };
+      const n = Number(price);
+      if (Number.isFinite(n) && n >= 0) {
+        line.price = n;
+        line.unit_price = n;
+        line.unitPrice = n;
+      }
+      lines[index] = line;
+    }
   }
 
   return {
