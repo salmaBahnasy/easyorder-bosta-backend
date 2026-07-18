@@ -15,6 +15,16 @@ const {
  * Does NOT change ERP order status (حالة الطلب) — that stays employee-driven.
  */
 
+function pickEasyConfirmEventHeader(headers = {}) {
+  if (!headers || typeof headers !== "object") return "";
+  return (
+    headers["x-easyconfirm-event"] ||
+    headers["X-EasyConfirm-Event"] ||
+    headers["x-easyconfirm-event".toLowerCase()] ||
+    ""
+  );
+}
+
 /**
  * Receive EasyConfirm webhook: log + update customer_status.
  *
@@ -26,12 +36,19 @@ const {
 async function receiveEasyConfirmWebhook({ headers, body }) {
   const receivedAt = new Date().toISOString();
   const payload = toEasyConfirmWebhookPayload(body);
+  const eventHeader = String(pickEasyConfirmEventHeader(headers) || "").trim();
+
+  // Prefer body.event; fall back to X-EasyConfirm-Event header
+  if (!payload.event && eventHeader) {
+    payload.event = eventHeader;
+  }
 
   console.log(
     JSON.stringify(
       {
         source: "easyconfirm-webhook",
         timestamp: receivedAt,
+        event: payload.event || eventHeader || null,
         headers: headers || {},
         body: payload,
       },
@@ -41,7 +58,9 @@ async function receiveEasyConfirmWebhook({ headers, body }) {
   );
 
   try {
-    const order = await applyEasyConfirmCustomerStatus(payload);
+    const order = await applyEasyConfirmCustomerStatus(payload, {
+      eventHeader,
+    });
     return {
       receivedAt,
       payload,
@@ -55,7 +74,7 @@ async function receiveEasyConfirmWebhook({ headers, body }) {
           timestamp: new Date().toISOString(),
           level: "warn",
           message: "Order not found for EasyConfirm payload",
-          event: payload?.event ?? null,
+          event: payload?.event || eventHeader || null,
           externalOrderId:
             payload?.data?.externalOrderId ??
             payload?.data?.external_order_id ??
@@ -85,7 +104,7 @@ async function receiveEasyConfirmWebhook({ headers, body }) {
           timestamp: new Date().toISOString(),
           level: "warn",
           message: error.message,
-          event: payload?.event ?? null,
+          event: payload?.event || eventHeader || null,
         }),
       );
       return {
@@ -102,4 +121,5 @@ async function receiveEasyConfirmWebhook({ headers, body }) {
 
 module.exports = {
   receiveEasyConfirmWebhook,
+  pickEasyConfirmEventHeader,
 };

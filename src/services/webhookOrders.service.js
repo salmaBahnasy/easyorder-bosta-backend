@@ -359,18 +359,11 @@ function syncCustomerStatusAliases(rawData) {
 
 /**
  * حالة العميل عند الإنشاء/الـ upsert.
- * من الويب هوك: لا تُصفَّر حالة EasyConfirm إن وُجدت مسبقاً.
+ * - EasyOrders يخزّن تأكيد واتساب في order.status (confirmed/canceled/pending)
+ * - من الويب هوك: لا نُصفّر confirmed/canceled إلى pending
  */
 function resolveCustomerStatus(payload, existingRow, options = {}) {
   const fromWebhook = Boolean(options.fromWebhook);
-  const requested = normalizeCustomerStatusInput(
-    pickMetaField(payload, "customer_status", "customerStatus"),
-  );
-
-  if (requested && CUSTOMER_STATUSES.includes(requested)) {
-    if (!fromWebhook) return requested;
-    if (!existingRow) return requested;
-  }
 
   const existingRaw =
     existingRow?.raw_data && typeof existingRow.raw_data === "object"
@@ -379,6 +372,49 @@ function resolveCustomerStatus(payload, existingRow, options = {}) {
   const existing = normalizeCustomerStatusInput(
     existingRaw.customer_status ?? existingRaw.customerStatus,
   );
+
+  const requested = normalizeCustomerStatusInput(
+    pickMetaField(payload, "customer_status", "customerStatus"),
+  );
+
+  // Explicit customer_status field
+  if (requested && CUSTOMER_STATUSES.includes(requested) && requested !== "pending") {
+    return requested;
+  }
+
+  // Prefer dedicated EasyOrders WhatsApp status when present on payload or existing row
+  const fromEasyOrdersField = normalizeCustomerStatusInput(
+    payload?.easyorders_status ??
+      payload?.easyOrdersStatus ??
+      existingRaw.easyorders_status ??
+      existingRaw.easyOrdersStatus,
+  );
+  if (
+    fromEasyOrdersField === "confirmed" ||
+    fromEasyOrdersField === "canceled"
+  ) {
+    return fromEasyOrdersField;
+  }
+
+  // EasyOrders WhatsApp confirmation historically arrives as order.status
+  // (confirmed/canceled/pending). Do NOT treat ERP "Confirmed" from our column
+  // updates as WhatsApp confirmation when fromWebhook is false — only trust
+  // payload.status on webhook / EasyOrders payloads.
+  if (fromWebhook || options.fromEasyOrders) {
+    const fromEasyOrdersStatus = normalizeCustomerStatusInput(payload?.status);
+    if (
+      fromEasyOrdersStatus === "confirmed" ||
+      fromEasyOrdersStatus === "canceled"
+    ) {
+      return fromEasyOrdersStatus;
+    }
+  }
+
+  if (requested && CUSTOMER_STATUSES.includes(requested)) {
+    if (!fromWebhook) return requested;
+    if (!existingRow) return requested;
+  }
+
   if (existing && CUSTOMER_STATUSES.includes(existing)) {
     return existing;
   }
@@ -1556,12 +1592,36 @@ async function addWebhookOrder(order, options = {}) {
   }
 
   const existingRow = await fetchOrderRowBySourceId(sourceOrderId);
+
+  // Preserve EasyOrders WhatsApp status separately — raw_data.status becomes ERP status below.
+  const incomingEasyOrdersStatus = normalizeMetaString(order?.status);
+  if (fromWebhook && incomingEasyOrdersStatus) {
+    raw_data.easyorders_status = incomingEasyOrdersStatus;
+    raw_data.easyOrdersStatus = incomingEasyOrdersStatus;
+  } else if (
+    existingRow?.raw_data &&
+    typeof existingRow.raw_data === "object" &&
+    existingRow.raw_data.easyorders_status
+  ) {
+    raw_data.easyorders_status = existingRow.raw_data.easyorders_status;
+    raw_data.easyOrdersStatus =
+      existingRow.raw_data.easyOrdersStatus ||
+      existingRow.raw_data.easyorders_status;
+  }
+
   const customerStatus = resolveCustomerStatus(order, existingRow, {
     fromWebhook,
   });
   raw_data.customer_status = customerStatus;
   raw_data.customerStatus = customerStatus;
   syncCustomerStatusAliases(raw_data);
+
+  // Preserve EasyOrders WhatsApp status separately (ERP status overwrites raw_data.status)
+  const easyOrdersStatusRaw = normalizeMetaString(order?.status);
+  if (easyOrdersStatusRaw) {
+    raw_data.easyorders_status = easyOrdersStatusRaw;
+    raw_data.easyOrdersStatus = easyOrdersStatusRaw;
+  }
 
   const createdAt = existingRow?.created_at
     ? new Date(existingRow.created_at)
@@ -4489,9 +4549,15 @@ function extractEasyConfirmOrderData(payload = {}) {
 /**
  * Apply EasyConfirm WhatsApp confirmation/cancellation to local order.
  * Updates customer_status only — does not change ERP status (حالة الطلب).
+ *
+ * @param {Object} payload
+ * @param {{ eventHeader?: string }} [options]
  */
-async function applyEasyConfirmCustomerStatus(payload = {}) {
-  const event = String(payload.event || "").trim().toLowerCase();
+async function applyEasyConfirmCustomerStatus(payload = {}, options = {}) {
+  const headerEvent = String(options.eventHeader || "").trim().toLowerCase();
+  const event = String(payload.event || headerEvent || "")
+    .trim()
+    .toLowerCase();
   const data = extractEasyConfirmOrderData(payload);
 
   let customerStatus = normalizeCustomerStatusInput(
@@ -4513,30 +4579,46 @@ async function applyEasyConfirmCustomerStatus(payload = {}) {
     event.endsWith(".cancelled")
   ) {
     customerStatus = "canceled";
-  }
-
-  if (!CUSTOMER_STATUSES.includes(customerStatus) || customerStatus === "pending") {
-    const err = new Error(
-      "EasyConfirm payload did not include a confirmation or cancellation status",
-    );
-    err.code = "INVALID_CUSTOMER_STATUS";
-    throw err;
+  } else if (event === "order.failed" || event.endsWith(".failed")) {
+    // Delivery failed — keep/link id, do not invent a confirmation
+    customerStatus = customerStatus === "canceled" ? "canceled" : "pending";
   }
 
   const order = await findOrderForEasyConfirm(data);
+  const existingStatus = normalizeCustomerStatusInput(
+    order.customer_status ?? order.customerStatus,
+  );
 
-  return mergeOrderRawDataPatch(order.sourceOrderId, {
-    customer_status: customerStatus,
-    customerStatus,
+  const patch = {
     easyconfirm_id: data.id ?? null,
-    easyconfirm_event: payload.event ?? null,
-    easyconfirm_customer_action: data.customerAction ?? data.customer_action ?? null,
-    easyconfirm_delivery_status: data.deliveryStatus ?? data.delivery_status ?? null,
+    easyconfirm_event: payload.event || options.eventHeader || null,
+    easyconfirm_customer_action:
+      data.customerAction ?? data.customer_action ?? null,
+    easyconfirm_delivery_status:
+      data.deliveryStatus ?? data.delivery_status ?? null,
     easyconfirm_external_order_id:
       data.externalOrderId ?? data.external_order_id ?? null,
+    easyconfirm_status: data.status ?? null,
     easyconfirm_last_webhook_at: new Date().toISOString(),
     easyconfirm_last_webhook_payload: payload,
-  });
+  };
+
+  const isFinal =
+    customerStatus === "confirmed" || customerStatus === "canceled";
+
+  if (isFinal) {
+    patch.customer_status = customerStatus;
+    patch.customerStatus = customerStatus;
+  } else if (
+    // order.created / pending / failed: link EasyConfirm id, don't wipe a final status
+    !existingStatus ||
+    existingStatus === "pending"
+  ) {
+    patch.customer_status = "pending";
+    patch.customerStatus = "pending";
+  }
+
+  return mergeOrderRawDataPatch(order.sourceOrderId, patch);
 }
 
 module.exports = {
