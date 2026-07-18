@@ -4375,19 +4375,51 @@ function parseExpenseForCostChart(raw) {
 }
 
 /**
+ * Expand EasyConfirm id candidates.
+ * "EO-28491" → also try "28491" (EasyOrders short_id is numeric).
+ */
+function expandEasyConfirmIdCandidates(values) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of values) {
+    const value = String(raw || "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+
+    const stripped = value.replace(/^EO-/i, "").trim();
+    if (stripped && !seen.has(stripped)) {
+      seen.add(stripped);
+      out.push(stripped);
+    }
+
+    if (/^\d+$/.test(stripped) && !seen.has(`EO-${stripped}`)) {
+      seen.add(`EO-${stripped}`);
+      out.push(`EO-${stripped}`);
+    }
+  }
+  return out;
+}
+
+function escapePostgrestFilterValue(value) {
+  // commas separate `.or()` clauses; backslashes are escape chars
+  return String(value).replace(/\\/g, "\\\\").replace(/,/g, "\\,");
+}
+
+/**
  * Resolve local order for an EasyConfirm webhook.
- * Tries: externalOrderId / id as order_id, then short_id, then order_reference.
+ * Tries: order_id (UUID), short_id / EO-short_id, then order_reference.
  */
 async function findOrderForEasyConfirm(data = {}) {
-  const candidates = [
+  const candidates = expandEasyConfirmIdCandidates([
     data.externalOrderId,
     data.external_order_id,
     data.orderId,
     data.order_id,
+    data.short_id,
+    data.shortId,
     data.id,
-  ]
-    .map((v) => String(v || "").trim())
-    .filter(Boolean);
+  ]);
 
   for (const candidate of candidates) {
     try {
@@ -4400,15 +4432,17 @@ async function findOrderForEasyConfirm(data = {}) {
   }
 
   for (const candidate of candidates) {
+    const escaped = escapePostgrestFilterValue(candidate);
     const { data: rows, error } = await supabase
       .from(ORDERS_TABLE)
       .select("*")
       .or(
         [
-          `raw_data->>short_id.eq.${candidate}`,
-          `raw_data->>shortId.eq.${candidate}`,
-          `raw_data->>externalOrderId.eq.${candidate}`,
-          `raw_data->>external_order_id.eq.${candidate}`,
+          `raw_data->>short_id.eq.${escaped}`,
+          `raw_data->>shortId.eq.${escaped}`,
+          `raw_data->>id.eq.${escaped}`,
+          `raw_data->>externalOrderId.eq.${escaped}`,
+          `raw_data->>external_order_id.eq.${escaped}`,
         ].join(","),
       )
       .limit(2);
@@ -4422,10 +4456,9 @@ async function findOrderForEasyConfirm(data = {}) {
   }
 
   for (const candidate of candidates) {
-    const numeric = String(candidate).replace(/^EO-/i, "").trim();
-    if (!/^\d+$/.test(numeric)) continue;
+    if (!/^\d+$/.test(candidate)) continue;
     try {
-      return await getWebhookOrderByReference(numeric);
+      return await getWebhookOrderByReference(candidate);
     } catch (error) {
       if (
         error.code !== "ORDER_NOT_FOUND" &&
@@ -4443,21 +4476,42 @@ async function findOrderForEasyConfirm(data = {}) {
 }
 
 /**
+ * Merge nested `data` with root fields so flat + nested EasyConfirm payloads both work.
+ */
+function extractEasyConfirmOrderData(payload = {}) {
+  const nested =
+    payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
+      ? payload.data
+      : {};
+  return { ...payload, ...nested };
+}
+
+/**
  * Apply EasyConfirm WhatsApp confirmation/cancellation to local order.
  * Updates customer_status only — does not change ERP status (حالة الطلب).
  */
 async function applyEasyConfirmCustomerStatus(payload = {}) {
   const event = String(payload.event || "").trim().toLowerCase();
-  const data =
-    payload.data && typeof payload.data === "object" ? payload.data : {};
+  const data = extractEasyConfirmOrderData(payload);
 
   let customerStatus = normalizeCustomerStatusInput(
     data.status || data.customerAction || data.customer_action,
   );
 
-  if (event === "order.confirmed") {
+  if (
+    event === "order.confirmed" ||
+    event === "confirmed" ||
+    event.endsWith(".confirmed")
+  ) {
     customerStatus = "confirmed";
-  } else if (event === "order.canceled" || event === "order.cancelled") {
+  } else if (
+    event === "order.canceled" ||
+    event === "order.cancelled" ||
+    event === "canceled" ||
+    event === "cancelled" ||
+    event.endsWith(".canceled") ||
+    event.endsWith(".cancelled")
+  ) {
     customerStatus = "canceled";
   }
 
