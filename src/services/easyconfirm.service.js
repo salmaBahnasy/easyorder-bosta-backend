@@ -55,8 +55,19 @@ async function receiveEasyConfirmWebhook({ headers, body }) {
           timestamp: new Date().toISOString(),
           level: "warn",
           message: "Order not found for EasyConfirm payload",
-          externalOrderId: payload?.data?.externalOrderId ?? null,
-          easyconfirmId: payload?.data?.id ?? null,
+          event: payload?.event ?? null,
+          externalOrderId:
+            payload?.data?.externalOrderId ??
+            payload?.data?.external_order_id ??
+            payload?.externalOrderId ??
+            null,
+          orderId: payload?.data?.orderId ?? payload?.orderId ?? null,
+          shortId:
+            payload?.data?.short_id ??
+            payload?.data?.shortId ??
+            payload?.short_id ??
+            null,
+          easyconfirmId: payload?.data?.id ?? payload?.id ?? null,
         }),
       );
       return {

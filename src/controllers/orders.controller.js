@@ -21,7 +21,10 @@ const {
   normalizeOrderStatusInput,
   normalizeCustomerStatusInput,
 } = require("../services/webhookOrders.service");
-const { toPresentation } = require("../services/easyorderPresentation.service");
+const { toPresentation, withEasyConfirm } = require("../services/easyorderPresentation.service");
+const {
+  enrichOrderWithEasyConfirm,
+} = require("../services/easyconfirmApi.service");
 const {
   resolveEasyOrderDateRange,
   getEgyptDayRange,
@@ -891,21 +894,33 @@ async function getOrderByReference(req, res) {
     }
 
     const order = await getWebhookOrderByReference(rawRef);
+    const { order: enrichedOrder, easyConfirm } =
+      await enrichOrderWithEasyConfirm(order);
 
     if (req.query.presented === "true") {
-      const presented = toPresentation(order);
+      const presented = withEasyConfirm(
+        toPresentation(enrichedOrder) || enrichedOrder,
+        easyConfirm,
+      );
       res.json({
         success: true,
-        order_reference: order.order_reference ?? order.orderReference,
-        data: presented || order,
+        order_reference:
+          enrichedOrder.order_reference ?? enrichedOrder.orderReference,
+        data: presented,
       });
       return;
     }
 
     res.json({
       success: true,
-      order_reference: order.order_reference ?? order.orderReference,
-      data: order,
+      order_reference:
+        enrichedOrder.order_reference ?? enrichedOrder.orderReference,
+      data: {
+        ...enrichedOrder,
+        customer_status: enrichedOrder.customer_status,
+        customerStatus: enrichedOrder.customerStatus,
+        easyConfirm,
+      },
     });
   } catch (error) {
     if (error.code === "INVALID_ORDER_REFERENCE") {
@@ -952,33 +967,55 @@ async function getEasyOrderDetails(req, res) {
     }
 
     if (localOrder) {
+      const { order: enrichedOrder, easyConfirm } =
+        await enrichOrderWithEasyConfirm(localOrder);
+
       if (req.query.raw === "true") {
         res.json({
           success: true,
-          data: localOrder,
+          data: {
+            ...enrichedOrder,
+            easyConfirm,
+          },
         });
         return;
       }
 
-      const presented = toPresentation(localOrder);
+      const presented = withEasyConfirm(
+        toPresentation(enrichedOrder) || enrichedOrder,
+        easyConfirm,
+      );
       res.json({
         success: true,
-        data: presented || localOrder,
+        data: presented,
       });
       return;
     }
 
     const orderDetails = await easyorderService.getOrderById(orderId);
+    const { order: enrichedRemote, easyConfirm } =
+      await enrichOrderWithEasyConfirm(
+        orderDetails?.data && typeof orderDetails.data === "object"
+          ? { ...orderDetails, ...orderDetails.data }
+          : orderDetails,
+        { syncLocal: false },
+      );
 
     if (req.query.raw === "true") {
       res.json({
         success: true,
-        data: orderDetails,
+        data: {
+          ...enrichedRemote,
+          easyConfirm,
+        },
       });
       return;
     }
 
-    const presented = toPresentation(orderDetails);
+    const presented = withEasyConfirm(
+      toPresentation(enrichedRemote),
+      easyConfirm,
+    );
 
     if (!presented) {
       res.status(502).json({
