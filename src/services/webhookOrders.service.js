@@ -4575,4 +4575,5 @@ module.exports = {
   normalizeCustomerStatusInput,
   applyEasyConfirmCustomerStatus,
   findOrderForEasyConfirm,
+  mergeOrderRawDataPatch,
 };

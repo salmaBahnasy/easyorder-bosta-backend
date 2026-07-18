@@ -148,11 +148,19 @@ function toPresentation(payload) {
     order.customerStatus,
   ) || "pending";
 
+  const easyConfirm =
+    payload.easyConfirm && typeof payload.easyConfirm === "object"
+      ? payload.easyConfirm
+      : order.easyConfirm && typeof order.easyConfirm === "object"
+        ? order.easyConfirm
+        : null;
+
   return {
     id: order.id,
     shortId: order.short_id,
     status: order.status,
     customerStatus,
+    easyConfirm,
     timeline: {
       createdAt: order.created_at,
       updatedAt: order.updated_at,
@@ -210,7 +218,43 @@ function toPresentation(payload) {
   };
 }
 
+/**
+ * Attach EasyConfirm live confirmation block onto a presented order.
+ */
+function withEasyConfirm(presented, easyConfirm) {
+  if (!presented || typeof presented !== "object") return presented;
+  if (!easyConfirm) {
+    return {
+      ...presented,
+      easyConfirm: null,
+    };
+  }
+
+  const customerStatus =
+    firstNonEmptyString(easyConfirm.customerStatus, presented.customerStatus) ||
+    "pending";
+
+  return {
+    ...presented,
+    customerStatus,
+    easyConfirm: {
+      id: easyConfirm.id ?? null,
+      externalOrderId: easyConfirm.externalOrderId ?? null,
+      status: easyConfirm.status ?? null,
+      customerAction: easyConfirm.customerAction ?? null,
+      deliveryStatus: easyConfirm.deliveryStatus ?? null,
+      updatedAt: easyConfirm.updatedAt ?? null,
+      source: easyConfirm.source || "easyconfirm",
+    },
+    orderMeta: {
+      ...(presented.orderMeta || {}),
+      customerStatus,
+    },
+  };
+}
+
 module.exports = {
   unwrapOrder,
   toPresentation,
+  withEasyConfirm,
 };
