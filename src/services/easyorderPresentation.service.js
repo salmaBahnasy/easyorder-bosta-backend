@@ -219,33 +219,44 @@ function toPresentation(payload) {
 }
 
 /**
- * Attach EasyConfirm live confirmation block onto a presented order.
+ * Attach live WhatsApp confirmation (EasyOrders / EasyConfirm) onto a presented order.
  */
-function withEasyConfirm(presented, easyConfirm) {
+function withCustomerConfirmation(
+  presented,
+  { easyConfirm = null, easyOrdersConfirm = null } = {},
+) {
   if (!presented || typeof presented !== "object") return presented;
-  if (!easyConfirm) {
-    return {
-      ...presented,
-      easyConfirm: null,
-    };
-  }
 
   const customerStatus =
-    firstNonEmptyString(easyConfirm.customerStatus, presented.customerStatus) ||
-    "pending";
+    firstNonEmptyString(
+      presented.customerStatus,
+      easyConfirm?.customerStatus,
+      easyOrdersConfirm?.customerStatus,
+    ) || "pending";
 
   return {
     ...presented,
     customerStatus,
-    easyConfirm: {
-      id: easyConfirm.id ?? null,
-      externalOrderId: easyConfirm.externalOrderId ?? null,
-      status: easyConfirm.status ?? null,
-      customerAction: easyConfirm.customerAction ?? null,
-      deliveryStatus: easyConfirm.deliveryStatus ?? null,
-      updatedAt: easyConfirm.updatedAt ?? null,
-      source: easyConfirm.source || "easyconfirm",
-    },
+    easyConfirm: easyConfirm
+      ? {
+          id: easyConfirm.id ?? null,
+          externalOrderId: easyConfirm.externalOrderId ?? null,
+          status: easyConfirm.status ?? null,
+          customerAction: easyConfirm.customerAction ?? null,
+          deliveryStatus: easyConfirm.deliveryStatus ?? null,
+          updatedAt: easyConfirm.updatedAt ?? null,
+          source: easyConfirm.source || "easyconfirm",
+        }
+      : null,
+    easyOrdersConfirm: easyOrdersConfirm
+      ? {
+          id: easyOrdersConfirm.id ?? null,
+          shortId: easyOrdersConfirm.shortId ?? null,
+          status: easyOrdersConfirm.status ?? null,
+          customerStatus: easyOrdersConfirm.customerStatus ?? null,
+          source: easyOrdersConfirm.source || "easyorders",
+        }
+      : null,
     orderMeta: {
       ...(presented.orderMeta || {}),
       customerStatus,
@@ -253,8 +264,14 @@ function withEasyConfirm(presented, easyConfirm) {
   };
 }
 
+/** @deprecated use withCustomerConfirmation */
+function withEasyConfirm(presented, easyConfirm) {
+  return withCustomerConfirmation(presented, { easyConfirm });
+}
+
 module.exports = {
   unwrapOrder,
   toPresentation,
   withEasyConfirm,
+  withCustomerConfirmation,
 };

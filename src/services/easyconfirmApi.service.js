@@ -59,6 +59,13 @@ async function getOrderById(orderId) {
       notFound.code = "EASYCONFIRM_ORDER_NOT_FOUND";
       throw notFound;
     }
+    if (error.response?.status === 401 || error.response?.status === 403) {
+      const unauthorized = new Error(
+        error.response?.data?.message || "EasyConfirm API key unauthorized",
+      );
+      unauthorized.code = "EASYCONFIRM_UNAUTHORIZED";
+      throw unauthorized;
+    }
     throw error;
   }
 }
@@ -189,7 +196,19 @@ async function fetchEasyConfirmForOrder(order) {
         lastError = error;
         continue;
       }
-      if (error.code === "EASYCONFIRM_NOT_CONFIGURED") {
+      if (
+        error.code === "EASYCONFIRM_NOT_CONFIGURED" ||
+        error.code === "EASYCONFIRM_UNAUTHORIZED"
+      ) {
+        console.warn(
+          JSON.stringify({
+            source: "easyconfirm-api",
+            level: "warn",
+            message:
+              error.message ||
+              "EasyConfirm API key missing or invalid (must start with ek_)",
+          }),
+        );
         return null;
       }
       lastError = error;
