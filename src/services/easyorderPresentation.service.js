@@ -138,12 +138,21 @@ function toPresentation(payload) {
   const shippingStatus = firstNonEmptyString(
     payload.shipping_status,
     order.shipping_status,
+    payload.shippingStatus,
+    order.shippingStatus,
   );
+  const customerStatus = firstNonEmptyString(
+    payload.customer_status,
+    order.customer_status,
+    payload.customerStatus,
+    order.customerStatus,
+  ) || "pending";
 
   return {
     id: order.id,
     shortId: order.short_id,
     status: order.status,
+    customerStatus,
     timeline: {
       createdAt: order.created_at,
       updatedAt: order.updated_at,
@@ -196,6 +205,7 @@ function toPresentation(payload) {
       orderSource: orderSource || null,
       orderType: orderType || null,
       shippingStatus: shippingStatus || null,
+      customerStatus,
     },
   };
 }

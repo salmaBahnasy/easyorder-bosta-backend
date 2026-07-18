@@ -54,6 +54,19 @@ const SHIPPING_STATUS_OPTIONS = [
 
 const SHIPPING_STATUSES = SHIPPING_STATUS_OPTIONS.map((o) => o.value);
 
+/**
+ * حالة العميل (واتساب EasyConfirm) — منفصلة عن حالة الطلب ERP.
+ * pending = لم يرد بعد | confirmed = وافق | canceled = ألغى
+ */
+const CUSTOMER_STATUS_OPTIONS = [
+  { value: "pending", labelAr: "قيد الانتظار" },
+  { value: "confirmed", labelAr: "موافق" },
+  { value: "canceled", labelAr: "ملغي" },
+];
+
+const CUSTOMER_STATUSES = CUSTOMER_STATUS_OPTIONS.map((o) => o.value);
+const DEFAULT_CUSTOMER_STATUS = "pending";
+
 /** delivered أعلى أولوية عند تعارض shipping_status / shippingStatus */
 const SHIPPING_STATUS_RANK = {
   in_progress: 1,
@@ -291,7 +304,86 @@ function getOrdersFilterLists() {
       labelAr: "حالة الطلب",
       options: ORDER_STATUS_OPTIONS,
     },
+    customerStatus: {
+      key: "customer_status",
+      labelAr: "حالة العميل",
+      options: CUSTOMER_STATUS_OPTIONS,
+    },
   };
+}
+
+function normalizeCustomerStatusInput(value) {
+  const raw = normalizeMetaString(value);
+  if (!raw) return "";
+  if (CUSTOMER_STATUSES.includes(raw)) return raw;
+
+  const lower = raw.toLowerCase();
+  const aliases = {
+    pending: "pending",
+    waiting: "pending",
+    confirmed: "confirmed",
+    approved: "confirmed",
+    confirm: "confirmed",
+    canceled: "canceled",
+    cancelled: "canceled",
+    cancel: "canceled",
+  };
+  if (aliases[lower]) return aliases[lower];
+
+  const arabic = {
+    "قيد الانتظار": "pending",
+    انتظار: "pending",
+    موافق: "confirmed",
+    مؤكد: "confirmed",
+    ملغي: "canceled",
+    ملغى: "canceled",
+  };
+  if (arabic[raw]) return arabic[raw];
+
+  return raw;
+}
+
+/** يوحّد customer_status / customerStatus في raw_data */
+function syncCustomerStatusAliases(rawData) {
+  if (!rawData || typeof rawData !== "object") return rawData;
+  const snake = normalizeCustomerStatusInput(rawData.customer_status);
+  const camel = normalizeCustomerStatusInput(rawData.customerStatus);
+  const effective =
+    (CUSTOMER_STATUSES.includes(snake) && snake) ||
+    (CUSTOMER_STATUSES.includes(camel) && camel) ||
+    DEFAULT_CUSTOMER_STATUS;
+  rawData.customer_status = effective;
+  rawData.customerStatus = effective;
+  return rawData;
+}
+
+/**
+ * حالة العميل عند الإنشاء/الـ upsert.
+ * من الويب هوك: لا تُصفَّر حالة EasyConfirm إن وُجدت مسبقاً.
+ */
+function resolveCustomerStatus(payload, existingRow, options = {}) {
+  const fromWebhook = Boolean(options.fromWebhook);
+  const requested = normalizeCustomerStatusInput(
+    pickMetaField(payload, "customer_status", "customerStatus"),
+  );
+
+  if (requested && CUSTOMER_STATUSES.includes(requested)) {
+    if (!fromWebhook) return requested;
+    if (!existingRow) return requested;
+  }
+
+  const existingRaw =
+    existingRow?.raw_data && typeof existingRow.raw_data === "object"
+      ? existingRow.raw_data
+      : {};
+  const existing = normalizeCustomerStatusInput(
+    existingRaw.customer_status ?? existingRaw.customerStatus,
+  );
+  if (existing && CUSTOMER_STATUSES.includes(existing)) {
+    return existing;
+  }
+
+  return DEFAULT_CUSTOMER_STATUS;
 }
 
 function pickMetaField(payload, snakeKey, camelKey) {
@@ -1075,11 +1167,14 @@ function mapStoredOrderToClient(row) {
   syncShippingStatusAliases(raw);
   syncCustomerPhoneAliases(raw);
   syncPaymentMethodAliases(raw);
+  syncCustomerStatusAliases(raw);
   return {
     ...raw,
     sourceOrderId: row.order_id,
     status: row.status,
     orderStatus: row.status,
+    customer_status: raw.customer_status,
+    customerStatus: raw.customerStatus,
     receivedAt: row.created_at,
     ...(ref != null
       ? {
@@ -1299,6 +1394,7 @@ async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
   };
   syncCustomerPhoneAliases(mergedRawData);
   syncShippingStatusAliases(mergedRawData);
+  syncCustomerStatusAliases(mergedRawData);
 
   let nextStatus = existingOrder.status;
   if (options.status && ALLOWED_ORDER_STATUSES.includes(options.status)) {
@@ -1460,6 +1556,13 @@ async function addWebhookOrder(order, options = {}) {
   }
 
   const existingRow = await fetchOrderRowBySourceId(sourceOrderId);
+  const customerStatus = resolveCustomerStatus(order, existingRow, {
+    fromWebhook,
+  });
+  raw_data.customer_status = customerStatus;
+  raw_data.customerStatus = customerStatus;
+  syncCustomerStatusAliases(raw_data);
+
   const createdAt = existingRow?.created_at
     ? new Date(existingRow.created_at)
     : new Date();
@@ -1556,7 +1659,21 @@ function applyRawDataOrderTypeContainsOr(query, typeValue) {
   );
 }
 
-function applyRawDataMetaContains(query, { order_source, order_type, shipping_status }) {
+function applyRawDataCustomerStatusContainsOr(query, customerStatusValue) {
+  const v = String(customerStatusValue || "").trim();
+  if (!v) return query;
+  const e = escapePostgrestJsonStringForCsFragment(v);
+  return query.or(
+    `raw_data.cs.{"customer_status":"${e}"},raw_data.cs.{"customerStatus":"${e}"}`,
+  );
+}
+
+function applyRawDataMetaContains(query, {
+  order_source,
+  order_type,
+  shipping_status,
+  customer_status,
+}) {
   let q = query;
   if (order_source) {
     q = applyRawDataOrderSourceContainsOr(q, order_source);
@@ -1567,7 +1684,12 @@ function applyRawDataMetaContains(query, { order_source, order_type, shipping_st
   if (shipping_status) {
     q = applyRawDataShippingStatusContainsOr(q, shipping_status);
   }
-  if (!order_source && !order_type && !shipping_status) return query;
+  if (customer_status) {
+    q = applyRawDataCustomerStatusContainsOr(q, customer_status);
+  }
+  if (!order_source && !order_type && !shipping_status && !customer_status) {
+    return query;
+  }
   return q;
 }
 
@@ -1645,6 +1767,7 @@ async function getWebhookOrders({
   order_source,
   order_type,
   shipping_status,
+  customer_status,
   product_id,
   product_sku,
   phone,
@@ -1718,6 +1841,7 @@ async function getWebhookOrders({
       order_source,
       order_type,
       shipping_status,
+      customer_status,
     });
   }
 
@@ -2127,6 +2251,33 @@ async function editOrder(orderId, updates, actor) {
   if (
     Object.prototype.hasOwnProperty.call(
       normalizedIncomingUpdates,
+      "customerStatus",
+    )
+  ) {
+    normalizedIncomingUpdates.customer_status =
+      normalizedIncomingUpdates.customerStatus;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
+      "customer_status",
+    )
+  ) {
+    const v = normalizeCustomerStatusInput(
+      normalizedIncomingUpdates.customer_status,
+    );
+    if (!CUSTOMER_STATUSES.includes(v)) {
+      const invalidStatusError = new Error("Invalid customer_status");
+      invalidStatusError.code = "INVALID_ORDER_META";
+      throw invalidStatusError;
+    }
+    normalizedIncomingUpdates.customer_status = v;
+    normalizedIncomingUpdates.customerStatus = v;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(
+      normalizedIncomingUpdates,
       "order_source",
     )
   ) {
@@ -2176,6 +2327,7 @@ async function editOrder(orderId, updates, actor) {
   syncPaymentMethodAliases(mergedRawData);
   syncBostaLocationAliases(mergedRawData);
   syncOrderCartItemsBostaFields(mergedRawData);
+  syncCustomerStatusAliases(mergedRawData);
 
   if (changedBy) {
     mergedRawData.updated_by_employee_id = changedBy;
@@ -4222,6 +4374,117 @@ function parseExpenseForCostChart(raw) {
   return n;
 }
 
+/**
+ * Resolve local order for an EasyConfirm webhook.
+ * Tries: externalOrderId / id as order_id, then short_id, then order_reference.
+ */
+async function findOrderForEasyConfirm(data = {}) {
+  const candidates = [
+    data.externalOrderId,
+    data.external_order_id,
+    data.orderId,
+    data.order_id,
+    data.id,
+  ]
+    .map((v) => String(v || "").trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    try {
+      return await getWebhookOrderById(candidate);
+    } catch (error) {
+      if (error.code !== "ORDER_NOT_FOUND" && error.code !== "INVALID_ORDER_ID") {
+        throw error;
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const { data: rows, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("*")
+      .or(
+        [
+          `raw_data->>short_id.eq.${candidate}`,
+          `raw_data->>shortId.eq.${candidate}`,
+          `raw_data->>externalOrderId.eq.${candidate}`,
+          `raw_data->>external_order_id.eq.${candidate}`,
+        ].join(","),
+      )
+      .limit(2);
+
+    if (error) {
+      throw new Error(error.message);
+    }
+    if (rows?.length === 1) {
+      return mapStoredOrderToClient(rows[0]);
+    }
+  }
+
+  for (const candidate of candidates) {
+    const numeric = String(candidate).replace(/^EO-/i, "").trim();
+    if (!/^\d+$/.test(numeric)) continue;
+    try {
+      return await getWebhookOrderByReference(numeric);
+    } catch (error) {
+      if (
+        error.code !== "ORDER_NOT_FOUND" &&
+        error.code !== "INVALID_ORDER_REFERENCE" &&
+        error.code !== "ORDER_REFERENCE_AMBIGUOUS"
+      ) {
+        throw error;
+      }
+    }
+  }
+
+  const notFound = new Error("Order not found for EasyConfirm webhook");
+  notFound.code = "ORDER_NOT_FOUND";
+  throw notFound;
+}
+
+/**
+ * Apply EasyConfirm WhatsApp confirmation/cancellation to local order.
+ * Updates customer_status only — does not change ERP status (حالة الطلب).
+ */
+async function applyEasyConfirmCustomerStatus(payload = {}) {
+  const event = String(payload.event || "").trim().toLowerCase();
+  const data =
+    payload.data && typeof payload.data === "object" ? payload.data : {};
+
+  let customerStatus = normalizeCustomerStatusInput(
+    data.status || data.customerAction || data.customer_action,
+  );
+
+  if (event === "order.confirmed") {
+    customerStatus = "confirmed";
+  } else if (event === "order.canceled" || event === "order.cancelled") {
+    customerStatus = "canceled";
+  }
+
+  if (!CUSTOMER_STATUSES.includes(customerStatus) || customerStatus === "pending") {
+    const err = new Error(
+      "EasyConfirm payload did not include a confirmation or cancellation status",
+    );
+    err.code = "INVALID_CUSTOMER_STATUS";
+    throw err;
+  }
+
+  const order = await findOrderForEasyConfirm(data);
+
+  return mergeOrderRawDataPatch(order.sourceOrderId, {
+    customer_status: customerStatus,
+    customerStatus,
+    easyconfirm_id: data.id ?? null,
+    easyconfirm_event: payload.event ?? null,
+    easyconfirm_customer_action: data.customerAction ?? data.customer_action ?? null,
+    easyconfirm_delivery_status: data.deliveryStatus ?? data.delivery_status ?? null,
+    easyconfirm_external_order_id:
+      data.externalOrderId ?? data.external_order_id ?? null,
+    easyconfirm_last_webhook_at: new Date().toISOString(),
+    easyconfirm_last_webhook_payload: payload,
+  });
+}
+
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
@@ -4249,7 +4512,13 @@ module.exports = {
   ORDER_TYPE_OPTIONS,
   SHIPPING_STATUSES,
   SHIPPING_STATUS_OPTIONS,
+  CUSTOMER_STATUSES,
+  CUSTOMER_STATUS_OPTIONS,
+  DEFAULT_CUSTOMER_STATUS,
   ORDER_STATUS_OPTIONS,
   getOrdersFilterLists,
   normalizeOrderStatusInput,
+  normalizeCustomerStatusInput,
+  applyEasyConfirmCustomerStatus,
+  findOrderForEasyConfirm,
 };
