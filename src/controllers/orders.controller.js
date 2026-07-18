@@ -16,8 +16,10 @@ const {
   ORDER_SOURCES,
   ORDER_TYPES,
   SHIPPING_STATUSES,
+  CUSTOMER_STATUSES,
   getOrdersFilterLists,
   normalizeOrderStatusInput,
+  normalizeCustomerStatusInput,
 } = require("../services/webhookOrders.service");
 const { toPresentation } = require("../services/easyorderPresentation.service");
 const {
@@ -357,6 +359,12 @@ function buildOrdersListFilters(req, pagination = {}) {
   const shipping_status = optionalSentinelFilter(
     source.shipping_status || source.shippingStatus,
   );
+  const customerStatusRaw = optionalSentinelFilter(
+    source.customer_status || source.customerStatus,
+  );
+  const customer_status = customerStatusRaw
+    ? normalizeCustomerStatusInput(customerStatusRaw)
+    : undefined;
   const easyorder_id = optionalSentinelFilter(
     source.easyorder_id || source.easyorderId,
   );
@@ -416,6 +424,15 @@ function buildOrdersListFilters(req, pagination = {}) {
     throw err;
   }
 
+  if (
+    customer_status &&
+    !CUSTOMER_STATUSES.includes(String(customer_status).trim())
+  ) {
+    const err = new Error("Invalid customer_status filter");
+    err.code = "INVALID_CUSTOMER_STATUS";
+    throw err;
+  }
+
   const filters = {
     page,
     limit,
@@ -426,6 +443,7 @@ function buildOrdersListFilters(req, pagination = {}) {
     order_source,
     order_type,
     shipping_status,
+    customer_status,
     product_id,
     product_sku,
     phone,
@@ -444,6 +462,7 @@ function buildOrdersListFilters(req, pagination = {}) {
     order_source,
     order_type,
     shipping_status,
+    customer_status,
     product_id,
     easyorder_id: easyorder_id || undefined,
     product_sku,
@@ -500,6 +519,14 @@ async function getOrders(req, res) {
           success: false,
           message: error.message,
           allowedShippingStatuses: SHIPPING_STATUSES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_CUSTOMER_STATUS") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedCustomerStatuses: CUSTOMER_STATUSES,
         });
         return;
       }
@@ -583,6 +610,14 @@ async function exportOrders(req, res) {
           success: false,
           message: error.message,
           allowedShippingStatuses: SHIPPING_STATUSES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_CUSTOMER_STATUS") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedCustomerStatuses: CUSTOMER_STATUSES,
         });
         return;
       }

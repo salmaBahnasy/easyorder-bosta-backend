@@ -8,6 +8,7 @@ require("dotenv").config({
 
 const ordersRoutes = require("./routes/orders.routes");
 const webhooksRoutes = require("./routes/webhooks.routes");
+const easyconfirmRoutes = require("./routes/easyconfirm.routes");
 const employeesRoutes = require("./routes/employees.routes");
 const productsRoutes = require("./routes/products.routes");
 const sallaRoutes = require("./routes/salla.routes");
@@ -32,6 +33,8 @@ app.get("/", (req, res) => {
 // routes
 app.use("/api/orders", ordersRoutes);
 app.use("/webhooks", webhooksRoutes);
+// EasyConfirm WhatsApp confirmation/cancellation webhooks (isolated from EasyOrders)
+app.use("/webhooks", easyconfirmRoutes);
 app.use("/api/employees", employeesRoutes);
 app.use("/api/easyorder", easyorderRoutes);
 app.use("/api/products", productsRoutes);
