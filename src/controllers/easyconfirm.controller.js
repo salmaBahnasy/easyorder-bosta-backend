@@ -5,33 +5,57 @@ const {
 /**
  * POST /webhooks/easyconfirm
  *
- * EasyConfirm calls this when a customer confirms or cancels an order via WhatsApp.
- *
- * - Logs headers + body
- * - Updates customer_status (حالة العميل) on the matched order
- * - Returns 200 immediately (even if order was not found — logged as warning)
+ * EasyConfirm WhatsApp confirmation / cancellation / failure callbacks.
+ * Always acknowledges with 2xx when the payload is accepted (except invalid signature).
  */
 async function handleEasyConfirmWebhook(req, res) {
   try {
     const result = await receiveEasyConfirmWebhook({
       headers: req.headers,
       body: req.body,
+      rawBody: req.rawBody,
     });
 
     res.status(200).json({
       success: true,
+      duplicate: Boolean(result.duplicate),
+      ...(result.eventId ? { eventId: result.eventId } : {}),
       ...(result.warning ? { warning: result.warning } : {}),
       ...(result.order
         ? {
             data: {
               sourceOrderId: result.order.sourceOrderId,
+              confirmation_status:
+                result.order.confirmation_status ??
+                result.order.confirmationStatus ??
+                null,
               customer_status: result.order.customer_status,
               customerStatus: result.order.customerStatus,
+              confirmation_source:
+                result.order.confirmation_source ?? "easyconfirm",
+              confirmation_updated_at:
+                result.order.confirmation_updated_at ?? null,
             },
           }
         : {}),
     });
   } catch (error) {
+    if (error.code === "EASYCONFIRM_INVALID_SIGNATURE") {
+      console.warn(
+        JSON.stringify({
+          source: "easyconfirm-webhook",
+          timestamp: new Date().toISOString(),
+          level: "warn",
+          message: error.message,
+        }),
+      );
+      res.status(401).json({
+        success: false,
+        message: error.message || "Invalid signature",
+      });
+      return;
+    }
+
     console.error(
       JSON.stringify({
         source: "easyconfirm-webhook",
@@ -42,6 +66,9 @@ async function handleEasyConfirmWebhook(req, res) {
       }),
     );
 
+    // Still prefer 200 for unexpected processing errors so EasyConfirm does not
+    // hammer retries — except we already returned 401 for bad signatures.
+    // For hard failures, return 500 so they can retry.
     res.status(500).json({
       success: false,
       message: "Failed to process EasyConfirm webhook",

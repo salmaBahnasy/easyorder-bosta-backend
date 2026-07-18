@@ -21,7 +21,20 @@ const port = process.env.PORT || 5050;
 
 // middleware
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+// Capture raw body for EasyConfirm HMAC verification (docs require raw bytes)
+app.use(
+  express.json({
+    limit: "10mb",
+    verify: (req, _res, buf) => {
+      if (
+        req.originalUrl &&
+        String(req.originalUrl).includes("/webhooks/easyconfirm")
+      ) {
+        req.rawBody = Buffer.from(buf);
+      }
+    },
+  }),
+);
 
 // health check
 app.get("/", (req, res) => {
