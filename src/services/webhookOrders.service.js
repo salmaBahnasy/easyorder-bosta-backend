@@ -360,9 +360,28 @@ function syncCustomerStatusAliases(rawData) {
   return rawData;
 }
 
+function isTruthyFlag(value) {
+  if (value === true || value === 1) return true;
+  const s = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "true" || s === "1" || s === "yes";
+}
+
+/** طلب يدوي من السيستم (مش webhook EasyOrders). */
+function isManualOrderFlag(payload = {}, existingRaw = {}) {
+  return (
+    isTruthyFlag(payload?.is_manual) ||
+    isTruthyFlag(payload?.isManual) ||
+    isTruthyFlag(existingRaw?.is_manual) ||
+    isTruthyFlag(existingRaw?.isManual)
+  );
+}
+
 /**
  * حالة العميل عند الإنشاء/الـ upsert.
  * - EasyOrders يخزّن تأكيد واتساب في order.status (confirmed/canceled/pending)
+ * - إنشاء يدوي من POST /api/orders (fromWebhook=false): customerStatus دائمًا confirmed
  * - من الويب هوك: لا نُصفّر confirmed/canceled إلى pending
  */
 function resolveCustomerStatus(payload, existingRow, options = {}) {
@@ -375,6 +394,11 @@ function resolveCustomerStatus(payload, existingRow, options = {}) {
   const existing = normalizeCustomerStatusInput(
     existingRaw.customer_status ?? existingRaw.customerStatus,
   );
+
+  // All non-webhook creates (POST /api/orders) are manual → always confirmed
+  if (!fromWebhook) {
+    return "confirmed";
+  }
 
   const requested = normalizeCustomerStatusInput(
     pickMetaField(payload, "customer_status", "customerStatus"),
@@ -1214,6 +1238,8 @@ function mapStoredOrderToClient(row) {
     orderStatus: row.status,
     customer_status: raw.customer_status,
     customerStatus: raw.customerStatus,
+    is_manual: Boolean(raw.is_manual ?? raw.isManual),
+    isManual: Boolean(raw.is_manual ?? raw.isManual),
     confirmation_status: raw.confirmation_status ?? raw.confirmationStatus ?? null,
     confirmationStatus: raw.confirmation_status ?? raw.confirmationStatus ?? null,
     confirmation_source: raw.confirmation_source ?? raw.confirmationSource ?? null,
@@ -1620,6 +1646,21 @@ async function addWebhookOrder(order, options = {}) {
   }
 
   const existingRow = await fetchOrderRowBySourceId(sourceOrderId);
+
+  // POST /api/orders → manual; also preserve flag if an existing row already had it
+  const isManual =
+    !fromWebhook ||
+    isManualOrderFlag(
+      order,
+      existingRow?.raw_data && typeof existingRow.raw_data === "object"
+        ? existingRow.raw_data
+        : {},
+    );
+
+  if (isManual) {
+    raw_data.is_manual = true;
+    raw_data.isManual = true;
+  }
 
   // Preserve EasyOrders WhatsApp status separately — raw_data.status becomes ERP status below.
   const incomingEasyOrdersStatus = normalizeMetaString(order?.status);

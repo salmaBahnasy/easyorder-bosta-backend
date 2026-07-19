@@ -63,6 +63,9 @@ const POST_ORDER_MANUAL_EXAMPLE = {
   phone2: "01098765432",
   address: "العنوان",
   city: "القاهرة",
+  is_manual: true,
+  customerStatus: "confirmed",
+  customer_status: "confirmed",
   cart_items: [
     {
       product_id: 101,
@@ -766,7 +769,7 @@ async function createOrder(req, res) {
         url: postOrdersAbsoluteUrl(req),
         headers: { "Content-Type": "application/json" },
         notes: {
-          ar: "إنشاء يدوي: افتراضيًا مصدر الطلب متجر (store)، النوع جديد (new)، الشحن قيد التنفيذ (in_progress)، وحالة الطلب new. يمكن تجاوزها بإرسال order_source / order_type / shipping_status / status أو orderStatus (يُفضَّل orderStatus من الواجهة). من الويب هوك: POST /webhooks/easyorders/order-created يضبط المصدر متجرًا. إرسال Authorization: Bearer يملأ created_by_employee_id و user_email في raw_data.",
+          ar: "إنشاء يدوي من POST /api/orders: يُعلَّم تلقائيًا is_manual=true و customerStatus=confirmed (بغض النظر عن القيمة المرسلة). افتراضيًا: مصدر متجر، نوع جديد، شحن in_progress، حالة الطلب new. طلبات EasyOrders عبر الويب هوك تظل تتحدّث customerStatus من status عاديًا.",
           manualRequiredFields: [],
           manualOptionalMeta: [
             "order_source",
@@ -774,6 +777,9 @@ async function createOrder(req, res) {
             "shipping_status",
             "status",
             "orderStatus",
+            "is_manual",
+            "customerStatus",
+            "customer_status",
           ],
           allowedOrderSources: ORDER_SOURCES,
           allowedOrderTypes: ORDER_TYPES,

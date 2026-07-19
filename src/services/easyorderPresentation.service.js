@@ -143,14 +143,29 @@ function toPresentation(payload) {
     order.shippingStatus,
   );
 
-  const customerStatusRaw = firstNonEmptyString(
-    payload.customer_status,
-    order.customer_status,
-    payload.customerStatus,
-    order.customerStatus,
-    // EasyOrders stores WhatsApp confirmation in status
-    mapEasyOrdersStatusForDisplay(order.status || payload.status),
-  ) || "pending";
+  const isManual =
+    order.is_manual === true ||
+    order.isManual === true ||
+    payload.is_manual === true ||
+    payload.isManual === true ||
+    String(order.is_manual ?? order.isManual ?? "")
+      .trim()
+      .toLowerCase() === "true" ||
+    String(payload.is_manual ?? payload.isManual ?? "")
+      .trim()
+      .toLowerCase() === "true";
+
+  // Manual ERP orders are always customer-confirmed; never fall back to ERP status
+  const customerStatusRaw = isManual
+    ? "confirmed"
+    : firstNonEmptyString(
+        payload.customer_status,
+        order.customer_status,
+        payload.customerStatus,
+        order.customerStatus,
+        // EasyOrders stores WhatsApp confirmation in status
+        mapEasyOrdersStatusForDisplay(order.status || payload.status),
+      ) || "pending";
 
   const customerStatus =
     customerStatusRaw === "cancelled" ? "canceled" : customerStatusRaw;
@@ -166,6 +181,8 @@ function toPresentation(payload) {
     id: order.id,
     shortId: order.short_id ?? order.shortId,
     status: order.status,
+    is_manual: isManual,
+    isManual,
     customerStatus,
     // Alias for UI badges that still read confirmationStatus
     confirmationStatus:
@@ -255,6 +272,21 @@ function mapEasyOrdersStatusForDisplay(status) {
  */
 function withCustomerConfirmation(presented, { easyOrdersConfirm = null } = {}) {
   if (!presented || typeof presented !== "object") return presented;
+
+  // Manual orders stay confirmed — do not prefer EasyOrders overwrite
+  if (presented.is_manual || presented.isManual) {
+    return {
+      ...presented,
+      customerStatus: "confirmed",
+      confirmationStatus: "confirmed",
+      is_manual: true,
+      isManual: true,
+      orderMeta: {
+        ...(presented.orderMeta || {}),
+        customerStatus: "confirmed",
+      },
+    };
+  }
 
   const fromEo = easyOrdersConfirm?.customerStatus;
   const customerStatus =
