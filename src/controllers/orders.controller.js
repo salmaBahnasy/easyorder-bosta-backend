@@ -22,43 +22,22 @@ const {
   normalizeCustomerStatusInput,
 } = require("../services/webhookOrders.service");
 const { toPresentation, withCustomerConfirmation } = require("../services/easyorderPresentation.service");
-const {
-  enrichOrderWithEasyConfirm,
-} = require("../services/easyconfirmApi.service");
 
 /**
- * Sync customer confirmation from EasyOrders (WhatsApp) then EasyConfirm API.
+ * Sync WhatsApp confirmation status from EasyOrders API (order.status).
  */
 async function enrichOrderCustomerConfirmation(order, options = {}) {
-  let current = order;
-  let easyOrdersConfirm = null;
-  let easyConfirm = null;
-
-  if (current) {
-    const eo = await easyorderService.enrichOrderWithEasyOrdersCustomerStatus(
-      current,
-      options,
-    );
-    current = eo.order;
-    easyOrdersConfirm = eo.easyOrdersConfirm;
+  if (!order) {
+    return { order: null, easyOrdersConfirm: null };
   }
 
-  const localStatus = String(
-    current?.customer_status ?? current?.customerStatus ?? "",
-  )
-    .trim()
-    .toLowerCase();
-
-  // Skip EasyConfirm when EasyOrders already has a final confirmation
-  if (localStatus === "confirmed" || localStatus === "canceled") {
-    return { order: current, easyConfirm: null, easyOrdersConfirm };
-  }
-
-  const ec = await enrichOrderWithEasyConfirm(current, options);
+  const eo = await easyorderService.enrichOrderWithEasyOrdersCustomerStatus(
+    order,
+    options,
+  );
   return {
-    order: ec.order,
-    easyConfirm: ec.easyConfirm,
-    easyOrdersConfirm,
+    order: eo.order,
+    easyOrdersConfirm: eo.easyOrdersConfirm,
   };
 }
 const {
@@ -930,13 +909,13 @@ async function getOrderByReference(req, res) {
     }
 
     const order = await getWebhookOrderByReference(rawRef);
-    const { order: enrichedOrder, easyConfirm, easyOrdersConfirm } =
+    const { order: enrichedOrder, easyOrdersConfirm } =
       await enrichOrderCustomerConfirmation(order);
 
     if (req.query.presented === "true") {
       const presented = withCustomerConfirmation(
         toPresentation(enrichedOrder) || enrichedOrder,
-        { easyConfirm, easyOrdersConfirm },
+        { easyOrdersConfirm },
       );
       res.json({
         success: true,
@@ -955,7 +934,6 @@ async function getOrderByReference(req, res) {
         ...enrichedOrder,
         customer_status: enrichedOrder.customer_status,
         customerStatus: enrichedOrder.customerStatus,
-        easyConfirm,
         easyOrdersConfirm,
       },
     });
@@ -1004,7 +982,7 @@ async function getEasyOrderDetails(req, res) {
     }
 
     if (localOrder) {
-      const { order: enrichedOrder, easyConfirm, easyOrdersConfirm } =
+      const { order: enrichedOrder, easyOrdersConfirm } =
         await enrichOrderCustomerConfirmation(localOrder);
 
       if (req.query.raw === "true") {
@@ -1012,7 +990,6 @@ async function getEasyOrderDetails(req, res) {
           success: true,
           data: {
             ...enrichedOrder,
-            easyConfirm,
             easyOrdersConfirm,
           },
         });
@@ -1021,7 +998,7 @@ async function getEasyOrderDetails(req, res) {
 
       const presented = withCustomerConfirmation(
         toPresentation(enrichedOrder) || enrichedOrder,
-        { easyConfirm, easyOrdersConfirm },
+        { easyOrdersConfirm },
       );
       res.json({
         success: true,
@@ -1041,12 +1018,9 @@ async function getEasyOrderDetails(req, res) {
     );
     const enrichedRemote = {
       ...remoteBase,
-      ...(customerFromEo
-        ? {
-            customer_status: customerFromEo,
-            customerStatus: customerFromEo,
-          }
-        : {}),
+      customer_status: customerFromEo || "pending",
+      customerStatus: customerFromEo || "pending",
+      easyorders_status: remoteBase?.status ?? null,
     };
 
     const easyOrdersConfirm = {
@@ -1057,25 +1031,18 @@ async function getEasyOrderDetails(req, res) {
       source: "easyorders",
     };
 
-    const { order: withEc, easyConfirm } = await enrichOrderWithEasyConfirm(
-      enrichedRemote,
-      { syncLocal: false },
-    );
-
     if (req.query.raw === "true") {
       res.json({
         success: true,
         data: {
-          ...withEc,
-          easyConfirm,
+          ...enrichedRemote,
           easyOrdersConfirm,
         },
       });
       return;
     }
 
-    const presented = withCustomerConfirmation(toPresentation(withEc), {
-      easyConfirm,
+    const presented = withCustomerConfirmation(toPresentation(enrichedRemote), {
       easyOrdersConfirm,
     });
 
@@ -1106,6 +1073,65 @@ async function getEasyOrderDetails(req, res) {
       success: false,
       message: "Failed to fetch order details",
       error: error.response?.data || error.message,
+    });
+  }
+}
+
+/**
+ * POST /api/orders/:orderId/refresh-customer-status
+ * UI button «إظهار الحالة»: fetch EasyOrders status and update customerStatus.
+ */
+async function refreshCustomerStatus(req, res) {
+  try {
+    const orderId = String(req.params.orderId || "").trim();
+    if (!orderId) {
+      res.status(400).json({
+        success: false,
+        message: "orderId is required",
+      });
+      return;
+    }
+
+    const result =
+      await easyorderService.refreshCustomerStatusFromEasyOrders(orderId);
+
+    const presented = withCustomerConfirmation(
+      toPresentation(result.order) || result.order,
+      { easyOrdersConfirm: result.easyOrdersConfirm },
+    );
+
+    res.json({
+      success: true,
+      message: result.changed
+        ? "تم تحديث حالة العميل من EasyOrders"
+        : "حالة العميل محدّثة (بدون تغيير)",
+      data: {
+        orderId,
+        previousCustomerStatus: result.previousCustomerStatus,
+        customerStatus: result.customerStatus,
+        customer_status: result.customerStatus,
+        easyordersStatus: result.easyOrdersConfirm?.status ?? null,
+        changed: result.changed,
+        easyOrdersConfirm: result.easyOrdersConfirm,
+        order: presented,
+      },
+    });
+  } catch (error) {
+    if (error.code === "ORDER_NOT_FOUND" || error.code === "INVALID_ORDER_ID") {
+      res.status(error.statusCode || 404).json({
+        success: false,
+        message: error.message || "Order not found",
+        orderId: req.params.orderId,
+      });
+      return;
+    }
+
+    const status = error.statusCode || error.response?.status || 500;
+    res.status(status).json({
+      success: false,
+      message: "Failed to refresh customer status from EasyOrders",
+      error: error.response?.data || error.message,
+      orderId: req.params.orderId,
     });
   }
 }
@@ -1796,6 +1822,7 @@ module.exports = {
   getOrderByReference,
   changeOrderStatus,
   getEasyOrderDetails,
+  refreshCustomerStatus,
   getOrdersStats,
   getOrdersStatsTrend,
   getOrdersAnalytics,

@@ -8,6 +8,7 @@ const {
   getOrderByReference,
   changeOrderStatus,
   getEasyOrderDetails,
+  refreshCustomerStatus,
   getOrdersStats,
   getOrdersStatsTrend,
   getOrdersAnalytics,
@@ -39,6 +40,11 @@ router.post("/", optionalAuth, createOrder);
 router.patch("/:orderId", requireAuth, updateOrder);
 router.get("/", getOrders);
 router.patch("/:orderId/status", requireAuth, changeOrderStatus);
+router.post(
+  "/:orderId/refresh-customer-status",
+  requireAuth,
+  refreshCustomerStatus,
+);
 router.get("/:orderId", getEasyOrderDetails);
 
 router.post("/:orderId/send-to-bosta", requireAuth, sendOrderToBosta);

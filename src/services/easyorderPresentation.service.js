@@ -99,89 +99,89 @@ function formatLineItems(cartItems) {
       slug: firstNonEmptyString(product.slug, line.slug),
       quantity,
       unitPrice,
-      lineTotal: unitPrice * quantity,
-      isUpsell: Boolean(line.is_upsell),
-      thumbnail: firstNonEmptyString(product.thumb, line.thumb) || null,
+      lineTotal: quantity * (Number(unitPrice) || 0),
+      image: firstNonEmptyString(
+        product.thumbnail,
+        product.image,
+        line.image,
+        variant.image,
+      ),
     };
   });
 }
 
 function formatTracking(metadata) {
-  const tracking = metadata?.tracking;
-  if (!tracking || typeof tracking !== "object") return null;
-
-  return {
-    firstOrderAt: tracking.first_order_at || null,
-    firstVisitAt: tracking.first_visit_at || null,
-    ordersCount: tracking.orders_count,
-    sessionsCount: tracking.sessions_count,
-    visitDurationSeconds: tracking.visit_duration_seconds,
-    referrer: tracking.referrer || null,
-    pagesVisited: Array.isArray(tracking.pages_visited)
-      ? tracking.pages_visited
-      : [],
-  };
+  if (!metadata || typeof metadata !== "object") return null;
+  return metadata;
 }
 
+/**
+ * Present an EasyOrders / ERP order for the UI.
+ * customerStatus comes from EasyOrders WhatsApp confirmation (order.status).
+ */
 function toPresentation(payload) {
   const order = unwrapOrder(payload);
-  if (!order || !order.id) return null;
+  if (!order) return null;
 
-  const cartLines = order.cart_items ?? order.cartItems;
-  const lineItems = formatLineItems(Array.isArray(cartLines) ? cartLines : []);
-
+  const lineItems = formatLineItems(order.cart_items || order.cartItems || []);
   const orderSource = firstNonEmptyString(
-    payload.order_source,
     order.order_source,
+    order.orderSource,
+    payload.order_source,
+    payload.orderSource,
   );
-  const orderType = firstNonEmptyString(payload.order_type, order.order_type);
+  const orderType = firstNonEmptyString(
+    order.order_type,
+    order.orderType,
+    payload.order_type,
+    payload.orderType,
+  );
   const shippingStatus = firstNonEmptyString(
     payload.shipping_status,
     order.shipping_status,
     payload.shippingStatus,
     order.shippingStatus,
   );
-  const customerStatus = firstNonEmptyString(
+
+  const customerStatusRaw = firstNonEmptyString(
     payload.customer_status,
     order.customer_status,
     payload.customerStatus,
     order.customerStatus,
+    // EasyOrders stores WhatsApp confirmation in status
+    mapEasyOrdersStatusForDisplay(order.status || payload.status),
   ) || "pending";
 
-  const confirmationStatus = firstNonEmptyString(
-    payload.confirmation_status,
-    order.confirmation_status,
-    payload.confirmationStatus,
-    order.confirmationStatus,
-    customerStatus === "canceled" ? "cancelled" : customerStatus,
-  ) || "pending";
+  const customerStatus =
+    customerStatusRaw === "cancelled" ? "canceled" : customerStatusRaw;
 
-  const easyConfirm =
-    payload.easyConfirm && typeof payload.easyConfirm === "object"
-      ? payload.easyConfirm
-      : order.easyConfirm && typeof order.easyConfirm === "object"
-        ? order.easyConfirm
+  const easyOrdersConfirm =
+    payload.easyOrdersConfirm && typeof payload.easyOrdersConfirm === "object"
+      ? payload.easyOrdersConfirm
+      : order.easyOrdersConfirm && typeof order.easyOrdersConfirm === "object"
+        ? order.easyOrdersConfirm
         : null;
 
   return {
     id: order.id,
-    shortId: order.short_id,
+    shortId: order.short_id ?? order.shortId,
     status: order.status,
     customerStatus,
-    confirmationStatus,
+    // Alias for UI badges that still read confirmationStatus
+    confirmationStatus:
+      customerStatus === "canceled" ? "cancelled" : customerStatus,
     confirmationSource: firstNonEmptyString(
       payload.confirmation_source,
       order.confirmation_source,
-      payload.confirmationSource,
-      order.confirmationSource,
+      easyOrdersConfirm ? "easyorders" : "",
     ) || null,
-    confirmationUpdatedAt: firstNonEmptyString(
-      payload.confirmation_updated_at,
-      order.confirmation_updated_at,
-      payload.confirmationUpdatedAt,
-      order.confirmationUpdatedAt,
+    easyOrdersConfirm,
+    easyordersStatus: firstNonEmptyString(
+      order.easyorders_status,
+      order.easyOrdersStatus,
+      easyOrdersConfirm?.status,
+      order.status,
     ) || null,
-    easyConfirm,
     timeline: {
       createdAt: order.created_at,
       updatedAt: order.updated_at,
@@ -235,65 +235,61 @@ function toPresentation(payload) {
       orderType: orderType || null,
       shippingStatus: shippingStatus || null,
       customerStatus,
-      confirmationStatus,
     },
   };
 }
 
+function mapEasyOrdersStatusForDisplay(status) {
+  const raw = String(status || "")
+    .trim()
+    .toLowerCase();
+  if (raw === "confirmed" || raw === "approved") return "confirmed";
+  if (raw === "canceled" || raw === "cancelled") return "canceled";
+  if (raw === "pending" || raw === "waiting") return "pending";
+  if (raw === "failed") return "failed";
+  return "";
+}
+
 /**
- * Attach live WhatsApp confirmation (EasyOrders / EasyConfirm) onto a presented order.
+ * Prefer live EasyOrders confirmation on top of a presented order.
  */
-function withCustomerConfirmation(
-  presented,
-  { easyConfirm = null, easyOrdersConfirm = null } = {},
-) {
+function withCustomerConfirmation(presented, { easyOrdersConfirm = null } = {}) {
   if (!presented || typeof presented !== "object") return presented;
 
+  const fromEo = easyOrdersConfirm?.customerStatus;
   const customerStatus =
-    firstNonEmptyString(
-      presented.customerStatus,
-      easyConfirm?.customerStatus,
-      easyOrdersConfirm?.customerStatus,
-    ) || "pending";
+    firstNonEmptyString(fromEo, presented.customerStatus) || "pending";
+  const normalized =
+    customerStatus === "cancelled" ? "canceled" : customerStatus;
 
   return {
     ...presented,
-    customerStatus,
-    easyConfirm: easyConfirm
-      ? {
-          id: easyConfirm.id ?? null,
-          externalOrderId: easyConfirm.externalOrderId ?? null,
-          status: easyConfirm.status ?? null,
-          customerAction: easyConfirm.customerAction ?? null,
-          deliveryStatus: easyConfirm.deliveryStatus ?? null,
-          updatedAt: easyConfirm.updatedAt ?? null,
-          source: easyConfirm.source || "easyconfirm",
-        }
-      : null,
+    customerStatus: normalized,
+    confirmationStatus:
+      normalized === "canceled" ? "cancelled" : normalized,
+    confirmationSource: easyOrdersConfirm
+      ? "easyorders"
+      : presented.confirmationSource || null,
     easyOrdersConfirm: easyOrdersConfirm
       ? {
           id: easyOrdersConfirm.id ?? null,
           shortId: easyOrdersConfirm.shortId ?? null,
           status: easyOrdersConfirm.status ?? null,
           customerStatus: easyOrdersConfirm.customerStatus ?? null,
-          source: easyOrdersConfirm.source || "easyorders",
+          source: "easyorders",
         }
-      : null,
+      : presented.easyOrdersConfirm || null,
+    easyordersStatus:
+      easyOrdersConfirm?.status ?? presented.easyordersStatus ?? null,
     orderMeta: {
       ...(presented.orderMeta || {}),
-      customerStatus,
+      customerStatus: normalized,
     },
   };
-}
-
-/** @deprecated use withCustomerConfirmation */
-function withEasyConfirm(presented, easyConfirm) {
-  return withCustomerConfirmation(presented, { easyConfirm });
 }
 
 module.exports = {
   unwrapOrder,
   toPresentation,
-  withEasyConfirm,
   withCustomerConfirmation,
 };

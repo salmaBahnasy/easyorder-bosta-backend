@@ -55,7 +55,7 @@ const SHIPPING_STATUS_OPTIONS = [
 const SHIPPING_STATUSES = SHIPPING_STATUS_OPTIONS.map((o) => o.value);
 
 /**
- * حالة العميل (واتساب EasyConfirm) — منفصلة عن حالة الطلب ERP.
+ * حالة العميل (تأكيد واتساب من EasyOrders status) — منفصلة عن حالة الطلب ERP.
  * pending = لم يرد بعد | confirmed = وافق | canceled = ألغى
  */
 const CUSTOMER_STATUS_OPTIONS = [
@@ -1438,7 +1438,9 @@ async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
   };
   syncCustomerPhoneAliases(mergedRawData);
   syncShippingStatusAliases(mergedRawData);
-  syncCustomerStatusAliases(mergedRawData);
+  if (!options.skipCustomerStatusSync) {
+    syncCustomerStatusAliases(mergedRawData);
+  }
 
   let nextStatus = existingOrder.status;
   if (options.status && ALLOWED_ORDER_STATUSES.includes(options.status)) {
@@ -1455,8 +1457,26 @@ async function mergeOrderRawDataPatch(orderId, rawPatch, options = {}) {
     .select()
     .single();
 
-  if (error || !data) {
-    throw new Error(error?.message || "Failed to update order");
+  if (error) {
+    console.error("[orders] mergeOrderRawDataPatch Supabase error", {
+      orderId: id,
+      message: error.message,
+      code: error.code,
+      details: error.details,
+      hint: error.hint,
+    });
+    const err = new Error(error.message || "Failed to update order");
+    err.code = error.code || "SUPABASE_UPDATE_ERROR";
+    err.details = error.details;
+    err.hint = error.hint;
+    throw err;
+  }
+
+  if (!data) {
+    console.error("[orders] mergeOrderRawDataPatch returned no data", {
+      orderId: id,
+    });
+    throw new Error("Failed to update order: no data returned");
   }
 
   return mapStoredOrderToClient(data);
@@ -4442,292 +4462,6 @@ function parseExpenseForCostChart(raw) {
   return n;
 }
 
-/**
- * Expand EasyConfirm id candidates.
- * "EO-28491" → also try "28491" (EasyOrders short_id is numeric).
- */
-function expandEasyConfirmIdCandidates(values) {
-  const out = [];
-  const seen = new Set();
-  for (const raw of values) {
-    const value = String(raw || "").trim();
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    out.push(value);
-
-    const stripped = value.replace(/^EO-/i, "").trim();
-    if (stripped && !seen.has(stripped)) {
-      seen.add(stripped);
-      out.push(stripped);
-    }
-
-    if (/^\d+$/.test(stripped) && !seen.has(`EO-${stripped}`)) {
-      seen.add(`EO-${stripped}`);
-      out.push(`EO-${stripped}`);
-    }
-  }
-  return out;
-}
-
-function escapePostgrestFilterValue(value) {
-  // commas separate `.or()` clauses; backslashes are escape chars
-  return String(value).replace(/\\/g, "\\\\").replace(/,/g, "\\,");
-}
-
-/**
- * Match EasyConfirm data.externalOrderId to ERP orders.
- *
- * In this system externalOrderId is the sequential ERP number stored as
- * orders.order_reference (e.g. "7430" → order_reference = 7430).
- *
- * Also accepts:
- * - UUID → orders.order_id
- * - EO-{n} / short_id numeric → raw_data.short_id (legacy)
- *
- * Never uses EasyConfirm data.id or phone.
- */
-async function findOrderByEasyConfirmExternalOrderId(externalOrderId) {
-  const raw = String(externalOrderId || "").trim();
-  if (!raw) {
-    const err = new Error("externalOrderId is required");
-    err.code = "ORDER_NOT_FOUND";
-    throw err;
-  }
-
-  // Primary: numeric → order_reference (EasyConfirm sends "7430")
-  const numeric = raw.replace(/^EO-/i, "").trim();
-  if (/^\d+$/.test(numeric)) {
-    try {
-      return await getWebhookOrderByReference(numeric);
-    } catch (error) {
-      if (
-        error.code !== "ORDER_NOT_FOUND" &&
-        error.code !== "INVALID_ORDER_REFERENCE" &&
-        error.code !== "ORDER_REFERENCE_AMBIGUOUS"
-      ) {
-        throw error;
-      }
-    }
-  }
-
-  // UUID → orders.order_id
-  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
-    try {
-      return await getWebhookOrderById(raw);
-    } catch (error) {
-      if (error.code !== "ORDER_NOT_FOUND" && error.code !== "INVALID_ORDER_ID") {
-        throw error;
-      }
-    }
-  }
-
-  // Legacy: short_id / externalOrderId stored in raw_data
-  const escaped = escapePostgrestFilterValue(raw);
-  const { data: rows, error } = await supabase
-    .from(ORDERS_TABLE)
-    .select("*")
-    .or(
-      [
-        `raw_data->>short_id.eq.${escaped}`,
-        `raw_data->>shortId.eq.${escaped}`,
-        `raw_data->>externalOrderId.eq.${escaped}`,
-        `raw_data->>external_order_id.eq.${escaped}`,
-      ].join(","),
-    )
-    .limit(2);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-  if (rows?.length === 1) {
-    return mapStoredOrderToClient(rows[0]);
-  }
-
-  const notFound = new Error(
-    `Order not found for EasyConfirm externalOrderId=${raw}`,
-  );
-  notFound.code = "ORDER_NOT_FOUND";
-  throw notFound;
-}
-
-/**
- * @deprecated Prefer findOrderByEasyConfirmExternalOrderId
- */
-async function findOrderForEasyConfirm(data = {}) {
-  const external =
-    data.externalOrderId ||
-    data.external_order_id ||
-    (Array.isArray(data.candidates) ? data.candidates[0] : null) ||
-    data.orderId ||
-    data.order_id;
-  return findOrderByEasyConfirmExternalOrderId(external);
-}
-
-/**
- * Fallback match by customer phone when EasyConfirm payload has no order id.
- * Requires exactly one matching order.
- */
-async function findOrderForEasyConfirmByPhone(phone) {
-  const raw = String(phone || "").trim();
-  if (!raw) {
-    const err = new Error("phone is required");
-    err.code = "ORDER_NOT_FOUND";
-    throw err;
-  }
-
-  const digits = raw.replace(/\D/g, "");
-  const needles = [...new Set([raw, digits, digits.slice(-10)].filter(Boolean))];
-
-  const ids = new Set();
-  for (const needle of needles) {
-    const star = postgrestIlikeStarWrap(sanitizeIlikeNeedle(needle));
-    if (!star) continue;
-    const pageIds = await collectOrderIdsUnionIlikePaths({
-      paths: [
-        "raw_data->>phone",
-        "raw_data->>mobile",
-        "raw_data->>phone2",
-        "raw_data->>phone_2",
-        "raw_data->>secondary_phone",
-        "raw_data->>secondaryPhone",
-      ],
-      ilikePattern: star,
-      applyBaseFilters: (q) => q,
-    });
-    for (const id of pageIds || []) ids.add(String(id));
-    if (ids.size > 1) break;
-  }
-
-  if (ids.size === 0) {
-    const notFound = new Error("Order not found for EasyConfirm phone");
-    notFound.code = "ORDER_NOT_FOUND";
-    throw notFound;
-  }
-  if (ids.size > 1) {
-    const ambiguous = new Error("Multiple orders match this phone");
-    ambiguous.code = "ORDER_REFERENCE_AMBIGUOUS";
-    throw ambiguous;
-  }
-
-  const [onlyId] = [...ids];
-  return getWebhookOrderById(onlyId);
-}
-
-/**
- * Apply EasyConfirm confirmation fields onto an ERP order.
- * Does NOT change ERP status, shipping_status, or payment fields.
- */
-async function applyEasyConfirmConfirmationUpdate(orderId, params = {}) {
-  const {
-    confirmationStatus = null,
-    customerStatus = null,
-    eventType = null,
-    eventId = null,
-    payload = null,
-    extracted = {},
-    receivedAt = new Date().toISOString(),
-  } = params;
-
-  const patch = {
-    confirmation_source: "easyconfirm",
-    confirmation_updated_at: receivedAt,
-    easyconfirm_event: eventType,
-    easyconfirm_event_type: eventType,
-    easyconfirm_payload: payload,
-    easyconfirm_last_event_id: eventId,
-    easyconfirm_last_webhook_at: receivedAt,
-
-    easyconfirm_order_id: extracted.easyconfirmOrderId ?? null,
-    easyconfirm_id: extracted.easyconfirmOrderId ?? null,
-    easyconfirm_external_order_id: extracted.externalOrderId ?? null,
-    easyconfirm_customer_action: extracted.customerAction ?? null,
-    easyconfirm_delivery_status: extracted.deliveryStatus ?? null,
-    easyconfirm_status: extracted.statusRaw ?? confirmationStatus ?? null,
-  };
-
-  if (confirmationStatus) {
-    patch.confirmation_status = confirmationStatus;
-  }
-
-  if (customerStatus && CUSTOMER_STATUSES.includes(customerStatus)) {
-    const existing = await fetchOrderRowBySourceId(orderId);
-    const existingRaw =
-      existing?.raw_data && typeof existing.raw_data === "object"
-        ? existing.raw_data
-        : {};
-    const prev = normalizeCustomerStatusInput(
-      existingRaw.customer_status ?? existingRaw.customerStatus,
-    );
-    const isFinal = customerStatus === "confirmed" || customerStatus === "canceled";
-    const prevFinal = prev === "confirmed" || prev === "canceled";
-
-    // Don't downgrade confirmed/canceled to pending/failed unless explicitly cancelled/failed final
-    if (isFinal || !prevFinal) {
-      patch.customer_status = customerStatus;
-      patch.customerStatus = customerStatus;
-    }
-  }
-
-  // Explicitly do NOT set: status, shipping_status, shippingStatus, payment_method, paymentMethod
-  return mergeOrderRawDataPatch(orderId, patch);
-}
-
-/**
- * @deprecated Use applyEasyConfirmConfirmationUpdate via easyconfirm.service
- */
-async function applyEasyConfirmCustomerStatus(payload = {}, options = {}) {
-  const headerEvent = String(options.eventHeader || "").trim();
-  const data = extractEasyConfirmOrderData(payload);
-  if (!payload.event && headerEvent) payload.event = headerEvent;
-
-  const order = await findOrderForEasyConfirm(data);
-  const event = String(payload.event || "").toLowerCase();
-  let confirmationStatus = "pending";
-  if (event.includes("confirmed")) confirmationStatus = "confirmed";
-  else if (event.includes("cancel")) confirmationStatus = "cancelled";
-  else if (event.includes("failed")) confirmationStatus = "failed";
-  else {
-    const s = normalizeCustomerStatusInput(
-      data.status || data.customerAction || data.customer_action,
-    );
-    if (s === "confirmed") confirmationStatus = "confirmed";
-    else if (s === "canceled") confirmationStatus = "cancelled";
-    else if (s === "failed") confirmationStatus = "failed";
-  }
-
-  const customerStatus =
-    confirmationStatus === "cancelled"
-      ? "canceled"
-      : confirmationStatus === "failed"
-        ? "failed"
-        : confirmationStatus;
-
-  return applyEasyConfirmConfirmationUpdate(order.sourceOrderId, {
-    confirmationStatus,
-    customerStatus,
-    eventType: payload.event || headerEvent,
-    eventId: null,
-    payload,
-    extracted: {
-      easyconfirmOrderId: data.id ?? null,
-      externalOrderId: data.externalOrderId ?? data.external_order_id ?? null,
-      customerAction: data.customerAction ?? data.customer_action ?? null,
-      deliveryStatus: data.deliveryStatus ?? data.delivery_status ?? null,
-      statusRaw: data.status ?? null,
-    },
-  });
-}
-
-/**
- * Merge nested `data` with root fields so flat + nested EasyConfirm payloads both work.
- */
-function extractEasyConfirmOrderData(payload = {}) {
-  const nested =
-    payload.data && typeof payload.data === "object" && !Array.isArray(payload.data)
-      ? payload.data
-      : {};
-  return { ...payload, ...nested };
-}
 
 module.exports = {
   addWebhookOrder,
@@ -4763,10 +4497,5 @@ module.exports = {
   getOrdersFilterLists,
   normalizeOrderStatusInput,
   normalizeCustomerStatusInput,
-  applyEasyConfirmCustomerStatus,
-  applyEasyConfirmConfirmationUpdate,
-  findOrderForEasyConfirm,
-  findOrderByEasyConfirmExternalOrderId,
-  findOrderForEasyConfirmByPhone,
   mergeOrderRawDataPatch,
 };
