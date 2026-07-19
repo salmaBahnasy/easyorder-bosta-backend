@@ -10,8 +10,7 @@
     "delete-all-orders": "node scripts/delete-all-orders.js",
     "bosta-locations:sql": "node scripts/setup-bosta-locations-tables.js",
     "backfill-order-references": "node scripts/backfill-order-references.js --yes",
-    "backfill-customer-status": "node scripts/backfill-customer-status-from-easyorders.js --yes",
-    "setup-easyconfirm-webhook-events": "node scripts/setup-easyconfirm-webhook-events.js"
+    "backfill-customer-status": "node scripts/backfill-customer-status-from-easyorders.js --yes"
   },
   "keywords": [],
   "author": "",

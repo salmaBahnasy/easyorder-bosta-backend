@@ -8,14 +8,6 @@ module.exports = {
     baseUrl: process.env.EASYORDER_BASE_URL,
   },
 
-  easyconfirm: {
-    apiKey: process.env.EASYCONFIRM_API_KEY,
-    baseUrl:
-      process.env.EASYCONFIRM_API_BASE_URL ||
-      "https://api.easyconfirm.net/api/v1",
-    webhookSecret: process.env.EASYCONFIRM_WEBHOOK_SECRET,
-  },
-
   bosta: {
     apiKey: process.env.BOSTA_API_KEY,
     baseUrl: process.env.BOSTA_BASE_URL,

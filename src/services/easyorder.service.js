@@ -32,13 +32,16 @@ function mapEasyOrdersStatusToCustomerStatus(easyOrdersStatus) {
     .toLowerCase();
   if (raw === "confirmed" || raw === "approved") return "confirmed";
   if (raw === "canceled" || raw === "cancelled") return "canceled";
+  if (raw === "failed") return "failed";
   if (raw === "pending" || raw === "waiting") return "pending";
   return null;
 }
 
 /**
  * Live-sync customer confirmation from EasyOrders onto a local order.
- * Uses the same order id / short_id shown in the WhatsApp message.
+ * Source of truth: EasyOrders GET /orders/:id → status
+ *
+ * options.forceSync — always write to DB (used by "إظهار الحالة" button)
  */
 async function enrichOrderWithEasyOrdersCustomerStatus(order, options = {}) {
   if (!order || typeof order !== "object") {
@@ -46,6 +49,7 @@ async function enrichOrderWithEasyOrdersCustomerStatus(order, options = {}) {
   }
 
   const syncLocal = options.syncLocal !== false;
+  const forceSync = options.forceSync === true;
   const orderId = String(
     order.sourceOrderId || order.id || order.order_id || "",
   ).trim();
@@ -65,6 +69,17 @@ async function enrichOrderWithEasyOrdersCustomerStatus(order, options = {}) {
         orderId,
       }),
     );
+    if (options.throwOnError) {
+      const err = new Error(
+        error?.response?.data?.message ||
+          error?.message ||
+          "Failed to fetch EasyOrders order",
+      );
+      err.code = "EASYORDERS_FETCH_FAILED";
+      err.statusCode = error?.response?.status || 502;
+      err.cause = error;
+      throw err;
+    }
     return { order, easyOrdersConfirm: null };
   }
 
@@ -76,58 +91,114 @@ async function enrichOrderWithEasyOrdersCustomerStatus(order, options = {}) {
       : null;
 
   if (!remoteOrder) {
+    if (options.throwOnError) {
+      const err = new Error("EasyOrders order response was empty");
+      err.code = "EASYORDERS_EMPTY_RESPONSE";
+      err.statusCode = 502;
+      throw err;
+    }
     return { order, easyOrdersConfirm: null };
   }
 
-  const customerStatus = mapEasyOrdersStatusToCustomerStatus(remoteOrder.status);
+  const customerStatus =
+    mapEasyOrdersStatusToCustomerStatus(remoteOrder.status) || "pending";
   const easyOrdersConfirm = {
     id: remoteOrder.id ?? null,
     shortId: remoteOrder.short_id ?? remoteOrder.shortId ?? null,
     status: remoteOrder.status ?? null,
-    customerStatus: customerStatus || "pending",
+    customerStatus,
     source: "easyorders",
   };
-
-  if (!customerStatus || customerStatus === "pending") {
-    return { order, easyOrdersConfirm };
-  }
 
   const localStatus = String(
     order.customer_status ?? order.customerStatus ?? "",
   )
     .trim()
     .toLowerCase();
+  const localNormalized =
+    localStatus === "cancelled" ? "canceled" : localStatus;
 
   let enriched = {
     ...order,
     customer_status: customerStatus,
     customerStatus,
     short_id: order.short_id ?? remoteOrder.short_id,
+    easyorders_status: remoteOrder.status,
+    easyOrdersStatus: remoteOrder.status,
   };
 
-  if (syncLocal && order.sourceOrderId && localStatus !== customerStatus) {
-    try {
-      const { mergeOrderRawDataPatch } = require("./webhookOrders.service");
-      enriched = await mergeOrderRawDataPatch(order.sourceOrderId, {
-        customer_status: customerStatus,
-        customerStatus,
-        easyorders_status: remoteOrder.status,
-        easyorders_customer_synced_at: new Date().toISOString(),
-      });
-    } catch (error) {
-      console.warn(
-        JSON.stringify({
-          source: "easyorder-api",
-          level: "warn",
-          message: "Failed to sync EasyOrders confirmation to local order",
-          orderId: order.sourceOrderId,
-          error: error.message,
-        }),
-      );
-    }
+  const shouldWrite =
+    syncLocal &&
+    order.sourceOrderId &&
+    (forceSync || localNormalized !== customerStatus);
+
+  if (shouldWrite) {
+    const { mergeOrderRawDataPatch } = require("./webhookOrders.service");
+    enriched = await mergeOrderRawDataPatch(order.sourceOrderId, {
+      customer_status: customerStatus,
+      customerStatus,
+      easyorders_status: remoteOrder.status,
+      easyOrdersStatus: remoteOrder.status,
+      confirmation_source: "easyorders",
+      confirmation_status:
+        customerStatus === "canceled" ? "cancelled" : customerStatus,
+      easyorders_customer_synced_at: new Date().toISOString(),
+    });
   }
 
   return { order: enriched, easyOrdersConfirm };
+}
+
+/**
+ * Explicit refresh for UI button "إظهار الحالة".
+ * Always calls EasyOrders and persists customerStatus.
+ */
+async function refreshCustomerStatusFromEasyOrders(orderId) {
+  const id = String(orderId || "").trim();
+  if (!id) {
+    const err = new Error("order id is required");
+    err.code = "INVALID_ORDER_ID";
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const { getWebhookOrderById } = require("./webhookOrders.service");
+  let localOrder;
+  try {
+    localOrder = await getWebhookOrderById(id);
+  } catch (error) {
+    if (error.code === "ORDER_NOT_FOUND") {
+      // Still allow refresh using EasyOrders id directly if not in ERP yet
+      localOrder = { sourceOrderId: id, id };
+    } else {
+      throw error;
+    }
+  }
+
+  const previousStatus =
+    localOrder.customer_status ?? localOrder.customerStatus ?? "pending";
+
+  const { order, easyOrdersConfirm } =
+    await enrichOrderWithEasyOrdersCustomerStatus(
+      {
+        ...localOrder,
+        sourceOrderId: localOrder.sourceOrderId || id,
+      },
+      { syncLocal: true, forceSync: true, throwOnError: true },
+    );
+
+  return {
+    order,
+    easyOrdersConfirm,
+    previousCustomerStatus:
+      String(previousStatus).toLowerCase() === "cancelled"
+        ? "canceled"
+        : String(previousStatus).toLowerCase() || "pending",
+    customerStatus: easyOrdersConfirm.customerStatus,
+    changed:
+      String(previousStatus).toLowerCase().replace("cancelled", "canceled") !==
+      easyOrdersConfirm.customerStatus,
+  };
 }
 
 /** Fetches products list from EasyOrders external-apps API. */
@@ -165,4 +236,5 @@ module.exports = {
   getProductById,
   mapEasyOrdersStatusToCustomerStatus,
   enrichOrderWithEasyOrdersCustomerStatus,
+  refreshCustomerStatusFromEasyOrders,
 };
