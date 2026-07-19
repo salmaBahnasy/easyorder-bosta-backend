@@ -15,38 +15,38 @@ const sallaRoutes = require("./routes/salla.routes");
 const easyorderRoutes = require("./routes/easyorder.routes");
 const bostaRoutes = require("./routes/bosta.routes");
 const addedOrdersRoutes = require("./routes/addedOrders.routes");
+const {
+  handleEasyConfirmWebhook,
+} = require("./controllers/easyconfirm.controller");
 
 const app = express();
 const port = process.env.PORT || 5050;
 
-// middleware
 app.use(cors());
-// Capture raw body for EasyConfirm HMAC verification (docs require raw bytes)
-app.use(
-  express.json({
-    limit: "10mb",
-    verify: (req, _res, buf) => {
-      if (
-        req.originalUrl &&
-        String(req.originalUrl).includes("/webhooks/easyconfirm")
-      ) {
-        req.rawBody = Buffer.from(buf);
-      }
-    },
-  }),
+
+/**
+ * EasyConfirm webhook MUST use raw body for HMAC verification.
+ * Registered BEFORE express.json() so the body is not parsed first.
+ * Does not affect any other routes.
+ */
+app.post(
+  "/webhooks/easyconfirm",
+  express.raw({ type: "application/json", limit: "10mb" }),
+  handleEasyConfirmWebhook,
 );
 
-// health check
+// All other routes use normal JSON parsing
+app.use(express.json({ limit: "10mb" }));
+
 app.get("/", (req, res) => {
   res.json({
     message: "EasyOrder Bosta Backend is running",
   });
 });
 
-// routes
 app.use("/api/orders", ordersRoutes);
 app.use("/webhooks", webhooksRoutes);
-// EasyConfirm WhatsApp confirmation/cancellation webhooks (isolated from EasyOrders)
+// EasyConfirm debug GETs only (POST is registered above with express.raw)
 app.use("/webhooks", easyconfirmRoutes);
 app.use("/api/employees", employeesRoutes);
 app.use("/api/easyorder", easyorderRoutes);
@@ -55,7 +55,6 @@ app.use("/api/salla", sallaRoutes);
 app.use("/api/bosta", bostaRoutes);
 app.use("/api/added-orders", addedOrdersRoutes);
 
-// start server
 app.listen(port, () => {
   console.log(`Server running on http://localhost:${port}`);
 });

@@ -4475,60 +4475,30 @@ function escapePostgrestFilterValue(value) {
 }
 
 /**
- * Resolve local order for an EasyConfirm webhook.
- * Tries: order_id (UUID), short_id / EO-short_id, then order_reference.
- * Pass `candidates` array to search extra ids.
+ * Match EasyConfirm data.externalOrderId to ERP orders.
+ *
+ * In this system externalOrderId is the sequential ERP number stored as
+ * orders.order_reference (e.g. "7430" → order_reference = 7430).
+ *
+ * Also accepts:
+ * - UUID → orders.order_id
+ * - EO-{n} / short_id numeric → raw_data.short_id (legacy)
+ *
+ * Never uses EasyConfirm data.id or phone.
  */
-async function findOrderForEasyConfirm(data = {}) {
-  const candidates = expandEasyConfirmIdCandidates([
-    ...(Array.isArray(data.candidates) ? data.candidates : []),
-    data.externalOrderId,
-    data.external_order_id,
-    data.orderId,
-    data.order_id,
-    data.short_id,
-    data.shortId,
-    data.id,
-  ]);
-
-  for (const candidate of candidates) {
-    try {
-      return await getWebhookOrderById(candidate);
-    } catch (error) {
-      if (error.code !== "ORDER_NOT_FOUND" && error.code !== "INVALID_ORDER_ID") {
-        throw error;
-      }
-    }
+async function findOrderByEasyConfirmExternalOrderId(externalOrderId) {
+  const raw = String(externalOrderId || "").trim();
+  if (!raw) {
+    const err = new Error("externalOrderId is required");
+    err.code = "ORDER_NOT_FOUND";
+    throw err;
   }
 
-  for (const candidate of candidates) {
-    const escaped = escapePostgrestFilterValue(candidate);
-    const { data: rows, error } = await supabase
-      .from(ORDERS_TABLE)
-      .select("*")
-      .or(
-        [
-          `raw_data->>short_id.eq.${escaped}`,
-          `raw_data->>shortId.eq.${escaped}`,
-          `raw_data->>id.eq.${escaped}`,
-          `raw_data->>externalOrderId.eq.${escaped}`,
-          `raw_data->>external_order_id.eq.${escaped}`,
-        ].join(","),
-      )
-      .limit(2);
-
-    if (error) {
-      throw new Error(error.message);
-    }
-    if (rows?.length === 1) {
-      return mapStoredOrderToClient(rows[0]);
-    }
-  }
-
-  for (const candidate of candidates) {
-    if (!/^\d+$/.test(candidate)) continue;
+  // Primary: numeric → order_reference (EasyConfirm sends "7430")
+  const numeric = raw.replace(/^EO-/i, "").trim();
+  if (/^\d+$/.test(numeric)) {
     try {
-      return await getWebhookOrderByReference(candidate);
+      return await getWebhookOrderByReference(numeric);
     } catch (error) {
       if (
         error.code !== "ORDER_NOT_FOUND" &&
@@ -4540,9 +4510,57 @@ async function findOrderForEasyConfirm(data = {}) {
     }
   }
 
-  const notFound = new Error("Order not found for EasyConfirm webhook");
+  // UUID → orders.order_id
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+    try {
+      return await getWebhookOrderById(raw);
+    } catch (error) {
+      if (error.code !== "ORDER_NOT_FOUND" && error.code !== "INVALID_ORDER_ID") {
+        throw error;
+      }
+    }
+  }
+
+  // Legacy: short_id / externalOrderId stored in raw_data
+  const escaped = escapePostgrestFilterValue(raw);
+  const { data: rows, error } = await supabase
+    .from(ORDERS_TABLE)
+    .select("*")
+    .or(
+      [
+        `raw_data->>short_id.eq.${escaped}`,
+        `raw_data->>shortId.eq.${escaped}`,
+        `raw_data->>externalOrderId.eq.${escaped}`,
+        `raw_data->>external_order_id.eq.${escaped}`,
+      ].join(","),
+    )
+    .limit(2);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (rows?.length === 1) {
+    return mapStoredOrderToClient(rows[0]);
+  }
+
+  const notFound = new Error(
+    `Order not found for EasyConfirm externalOrderId=${raw}`,
+  );
   notFound.code = "ORDER_NOT_FOUND";
   throw notFound;
+}
+
+/**
+ * @deprecated Prefer findOrderByEasyConfirmExternalOrderId
+ */
+async function findOrderForEasyConfirm(data = {}) {
+  const external =
+    data.externalOrderId ||
+    data.external_order_id ||
+    (Array.isArray(data.candidates) ? data.candidates[0] : null) ||
+    data.orderId ||
+    data.order_id;
+  return findOrderByEasyConfirmExternalOrderId(external);
 }
 
 /**
@@ -4611,15 +4629,15 @@ async function applyEasyConfirmConfirmationUpdate(orderId, params = {}) {
   } = params;
 
   const patch = {
-    // Required confirmation fields
     confirmation_source: "easyconfirm",
     confirmation_updated_at: receivedAt,
+    easyconfirm_event: eventType,
     easyconfirm_event_type: eventType,
     easyconfirm_payload: payload,
     easyconfirm_last_event_id: eventId,
     easyconfirm_last_webhook_at: receivedAt,
 
-    // Helpful EasyConfirm metadata (does not touch shipping/payment/ERP status)
+    easyconfirm_order_id: extracted.easyconfirmOrderId ?? null,
     easyconfirm_id: extracted.easyconfirmOrderId ?? null,
     easyconfirm_external_order_id: extracted.externalOrderId ?? null,
     easyconfirm_customer_action: extracted.customerAction ?? null,
@@ -4748,6 +4766,7 @@ module.exports = {
   applyEasyConfirmCustomerStatus,
   applyEasyConfirmConfirmationUpdate,
   findOrderForEasyConfirm,
+  findOrderByEasyConfirmExternalOrderId,
   findOrderForEasyConfirmByPhone,
   mergeOrderRawDataPatch,
 };
