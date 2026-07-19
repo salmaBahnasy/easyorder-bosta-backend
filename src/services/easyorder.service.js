@@ -37,6 +37,19 @@ function mapEasyOrdersStatusToCustomerStatus(easyOrdersStatus) {
   return null;
 }
 
+function isTruthyFlag(value) {
+  if (value === true || value === 1) return true;
+  const s = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "true" || s === "1" || s === "yes";
+}
+
+/** Manual ERP order (POST /api/orders) — never sync customerStatus from EasyOrders. */
+function isManualOrder(order = {}) {
+  return isTruthyFlag(order?.is_manual) || isTruthyFlag(order?.isManual);
+}
+
 /**
  * Live-sync customer confirmation from EasyOrders onto a local order.
  * Source of truth: EasyOrders GET /orders/:id → status
@@ -46,6 +59,20 @@ function mapEasyOrdersStatusToCustomerStatus(easyOrdersStatus) {
 async function enrichOrderWithEasyOrdersCustomerStatus(order, options = {}) {
   if (!order || typeof order !== "object") {
     return { order, easyOrdersConfirm: null };
+  }
+
+  // Manual ERP orders keep customerStatus=confirmed — never overwrite from EasyOrders
+  if (isManualOrder(order)) {
+    return {
+      order: {
+        ...order,
+        customer_status: "confirmed",
+        customerStatus: "confirmed",
+        is_manual: true,
+        isManual: true,
+      },
+      easyOrdersConfirm: null,
+    };
   }
 
   const syncLocal = options.syncLocal !== false;
@@ -168,11 +195,19 @@ async function refreshCustomerStatusFromEasyOrders(orderId) {
     localOrder = await getWebhookOrderById(id);
   } catch (error) {
     if (error.code === "ORDER_NOT_FOUND") {
-      // Still allow refresh using EasyOrders id directly if not in ERP yet
       localOrder = { sourceOrderId: id, id };
     } else {
       throw error;
     }
+  }
+
+  if (isManualOrder(localOrder)) {
+    const err = new Error(
+      "Manual orders keep customerStatus=confirmed and cannot be refreshed from EasyOrders",
+    );
+    err.code = "MANUAL_ORDER_NO_REFRESH";
+    err.statusCode = 400;
+    throw err;
   }
 
   const previousStatus =

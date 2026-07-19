@@ -100,37 +100,11 @@ function chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap) {
 }
 
 function buildDayChartPoint(date, storedRow, ordersMap, shippedMap, deliveredMap) {
-  const live = chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap);
-  if (!storedRow) {
-    return live;
+  // Prefer fully stored daily row (expense + counts) — avoid live overrides
+  if (storedRow) {
+    return chartPointFromDailyRow(storedRow);
   }
-
-  const expense = Number(storedRow.expense) || 0;
-  return {
-    date,
-    expense: roundMoney(expense),
-    expenseEntered: expense > 0,
-    orders: seriesPointFromCounts(
-      expense,
-      live.orders.totalOrders,
-      live.orders.totalSales,
-    ),
-    shipped: seriesPointFromCounts(
-      expense,
-      live.shipped.totalOrders,
-      live.shipped.totalSales,
-    ),
-    delivered: seriesPointFromCounts(
-      expense,
-      live.delivered.totalOrders,
-      live.delivered.totalSales,
-    ),
-    successful: seriesPointFromCounts(
-      expense,
-      live.delivered.totalOrders,
-      live.delivered.totalSales,
-    ),
-  };
+  return chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap);
 }
 
 function aggregateDailyChartPoints(dailyPoints, bucketKey, granularity) {
@@ -273,6 +247,13 @@ async function saveOrderCostDailyEntry({
     throw new Error(error.message);
   }
 
+  try {
+    const { clearDashboardCache } = require("./dashboardCache.service");
+    clearDashboardCache();
+  } catch {
+    // ignore cache clear failures
+  }
+
   return {
     saved: data,
     chartPoint: chartPointFromDailyRow(data),
@@ -303,7 +284,9 @@ async function fetchOrderCostDailyRows(from, to) {
 }
 
 /**
- * جراف: المصروفات من order_cost_daily؛ أعداد الطلبات دائمًا live (مطابقة /stats).
+ * جراف التكلفة:
+ * - لو اليوم موجود في order_cost_daily → مصروفات + أعداد من التخزين (سريع)
+ * - الأيام الناقصة فقط → live scan من orders
  */
 async function getOrderCostChartFromStorage({
   from,
@@ -317,17 +300,7 @@ async function getOrderCostChartFromStorage({
   const dayKeys = listEgyptTrendBucketKeys(from, to, "day");
   const bucketKeys = listEgyptTrendBucketKeys(from, to, gran);
 
-  const [dailyRows, { ordersMap, shippedMap, deliveredMap }] = await Promise.all([
-    fetchOrderCostDailyRows(from, to),
-    computeOrderCostBucketMapsForRange({
-      from,
-      to,
-      dateBasis,
-      granularity: "day",
-      useEgyptBuckets: true,
-    }),
-  ]);
-
+  const dailyRows = await fetchOrderCostDailyRows(from, to);
   const byDate = new Map();
   for (const row of dailyRows) {
     const dateStr =
@@ -335,6 +308,26 @@ async function getOrderCostChartFromStorage({
         ? row.cost_date.slice(0, 10)
         : String(row.cost_date).slice(0, 10);
     byDate.set(dateStr, row);
+  }
+
+  const missingDays = dayKeys.filter((d) => !byDate.has(d));
+  let ordersMap = new Map();
+  let shippedMap = new Map();
+  let deliveredMap = new Map();
+  let liveTruncated = false;
+
+  if (missingDays.length > 0) {
+    const live = await computeOrderCostBucketMapsForRange({
+      from,
+      to,
+      dateBasis,
+      granularity: "day",
+      useEgyptBuckets: true,
+    });
+    ordersMap = live.ordersMap;
+    shippedMap = live.shippedMap;
+    deliveredMap = live.deliveredMap;
+    liveTruncated = Boolean(live.truncated);
   }
 
   const dailyPoints = dayKeys.map((date) =>
@@ -349,22 +342,22 @@ async function getOrderCostChartFromStorage({
         );
 
   const summary = summarizeChartPoints(points);
-  const liveFilledDaysCount = dayKeys.filter((d) => !byDate.has(d)).length;
 
   return {
-    source: "database",
+    source: missingDays.length === 0 ? "database" : "database+live",
     from: from.toISOString(),
     to: to.toISOString(),
     granularity: gran,
     dateBasis,
     formulaAr:
-      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. المصروفات من order_cost_daily؛ الأعداد live من الطلبات (Shipped = orders.status، successful = Shipped + delivered).",
+      "تكلفة الطلب = المصروفات ÷ عدد الطلبات. الأيام المخزّنة من order_cost_daily؛ الأيام الناقصة تُحسب live من الطلبات.",
     points,
     summary,
     storedDaysCount: dailyRows.length,
-    liveFilledDaysCount,
+    liveFilledDaysCount: missingDays.length,
     daysInRange: dayKeys.length,
     bucketsInRange: bucketKeys.length,
+    truncated: liveTruncated,
   };
 }
 
