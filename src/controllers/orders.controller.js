@@ -52,6 +52,7 @@ const {
   saveOrderCostDailyEntry,
   getOrderCostChartFromStorage,
 } = require("../services/orderCostDaily.service");
+const { withCache } = require("../services/dashboardCache.service");
 const { buildOrdersExcelBuffer } = require("../services/ordersExport.service");
 
 /** مثال لجسم POST /api/orders — الحقول الاختيارية: order_source (افتراضي store)، order_type (افتراضي new)، shipping_status (افتراضي in_progress)، status (افتراضي new). */
@@ -1241,18 +1242,34 @@ async function getOrdersStats(req, res) {
       throw error;
     }
 
-    const stats = await getOrdersStatistics({
-      employeeId,
-      from,
-      to,
-      ignoreEmployeeLogDateRange,
-      order_source,
-      order_type,
-      shipping_status,
-      status,
-      product_id,
-      product_sku,
-    });
+    const stats = await withCache(
+      "orders-stats",
+      {
+        employeeId,
+        ignoreEmployeeLogDateRange,
+        from: from?.toISOString() || null,
+        to: to?.toISOString() || null,
+        order_source,
+        order_type,
+        shipping_status,
+        status,
+        product_id,
+        product_sku,
+      },
+      () =>
+        getOrdersStatistics({
+          employeeId,
+          from,
+          to,
+          ignoreEmployeeLogDateRange,
+          order_source,
+          order_type,
+          shipping_status,
+          status,
+          product_id,
+          product_sku,
+        }),
+    ).then((r) => r.value);
 
     const statsWithLegacyKeys = {
       ...stats,
@@ -1389,20 +1406,38 @@ async function getOrdersStatsTrend(req, res) {
       throw error;
     }
 
-    const chart = await getOrdersStatsTimeSeries({
-      from,
-      to,
-      granularity,
-      employeeId,
-      ignoreEmployeeLogDateRange,
-      order_source,
-      order_type,
-      shipping_status,
-      status,
-      product_id,
-      product_sku,
-      useEgyptBuckets: isEasyOrderApiRequest(req),
-    });
+    const chart = await withCache(
+      "orders-stats-trend",
+      {
+        employeeId,
+        ignoreEmployeeLogDateRange,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity,
+        order_source,
+        order_type,
+        shipping_status,
+        status,
+        product_id,
+        product_sku,
+        useEgyptBuckets: isEasyOrderApiRequest(req),
+      },
+      () =>
+        getOrdersStatsTimeSeries({
+          from,
+          to,
+          granularity,
+          employeeId,
+          ignoreEmployeeLogDateRange,
+          order_source,
+          order_type,
+          shipping_status,
+          status,
+          product_id,
+          product_sku,
+          useEgyptBuckets: isEasyOrderApiRequest(req),
+        }),
+    ).then((r) => r.value);
 
     res.json({
       success: true,
@@ -1782,12 +1817,22 @@ async function getOrderCostChartHandler(req, res) {
       throw error;
     }
 
-    const chart = await getOrderCostChartFromStorage({
-      from,
-      to,
-      granularity,
-      dateBasis,
-    });
+    const chart = await withCache(
+      "order-cost-chart",
+      {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        granularity,
+        dateBasis,
+      },
+      () =>
+        getOrderCostChartFromStorage({
+          from,
+          to,
+          granularity,
+          dateBasis,
+        }),
+    ).then((r) => r.value);
 
     const singleDayKey =
       getEgyptCalendarDateKey(from) === getEgyptCalendarDateKey(to)

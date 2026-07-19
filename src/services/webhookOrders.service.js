@@ -2644,6 +2644,9 @@ function buildEmptyStatsBreakdownResponse() {
  * status filter narrows the universe; other status buckets are zero.
  * from/to on orders.created_at when set (including with employeeId); employee_scope=all_time
  * skips order created_at and uses unbounded logs/markers.
+ *
+ * Performance: single paginated scan of matching orders (same model as /stats/trend),
+ * then aggregate byStatus / byOrderSource / byOrderType / byShippingStatus / totals in memory.
  */
 async function getOrdersStatistics({
   employeeId,
@@ -2699,30 +2702,17 @@ async function getOrdersStatistics({
       ? String(listStatusFilter).trim()
       : null;
 
-  function applyStatsRawContains(query, breakdownDim, breakdownValue) {
+  function applyStatsRawContains(query) {
     let q = query;
-
-    const effectiveOrderSource =
-      breakdownDim === "order_source"
-        ? breakdownValue
-        : order_source || null;
-    const effectiveOrderType =
-      breakdownDim === "order_type" ? breakdownValue : order_type || null;
-    const effectiveShipping =
-      breakdownDim === "shipping_status"
-        ? breakdownValue
-        : shipping_status || null;
-
-    if (effectiveOrderSource) {
-      q = applyRawDataOrderSourceContainsOr(q, effectiveOrderSource);
+    if (order_source) {
+      q = applyRawDataOrderSourceContainsOr(q, order_source);
     }
-    if (effectiveOrderType) {
-      q = applyRawDataOrderTypeContainsOr(q, effectiveOrderType);
+    if (order_type) {
+      q = applyRawDataOrderTypeContainsOr(q, order_type);
     }
-    if (effectiveShipping) {
-      q = applyRawDataShippingStatusContainsOr(q, effectiveShipping);
+    if (shipping_status) {
+      q = applyRawDataShippingStatusContainsOr(q, shipping_status);
     }
-
     return q;
   }
 
@@ -2730,6 +2720,8 @@ async function getOrdersStatistics({
   const skuForStats = parseProductFilterInput(product_sku);
   const useProductUuidContains =
     pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats;
+  const productIdForUnitSum =
+    pidForStats && UUID_LIKE.test(pidForStats) ? pidForStats : null;
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
     let nextQ = q;
@@ -2742,18 +2734,34 @@ async function getOrdersStatistics({
     return { nextQ, skip: false };
   }
 
-  async function countAggregatedOrders(
-    breakdownDim,
-    breakdownValue,
-    options = {},
-  ) {
-    const { onlyOrderStatus } = options;
-    let sum = 0;
-    for (const chunk of chunks) {
-      let q = supabase.from(ORDERS_TABLE).select("order_id,raw_data,status");
+  const byStatus = Object.fromEntries(
+    Object.keys(STATS_STATUS_KEYS).map((k) => [k, 0]),
+  );
+  const byOrderSource = Object.fromEntries(ORDER_SOURCES.map((s) => [s, 0]));
+  const byOrderType = Object.fromEntries(ORDER_TYPES.map((t) => [t, 0]));
+  const byShippingStatus = Object.fromEntries(
+    SHIPPING_STATUSES.map((s) => [s, 0]),
+  );
 
+  let totalOrders = 0;
+  let totalProductUnits = 0;
+  let total = 0;
+  let rowCount = 0;
+  let truncated = false;
+
+  for (const chunk of chunks) {
+    let offset = 0;
+    for (;;) {
+      if (rowCount >= MAX_STATS_ROWS) {
+        truncated = true;
+        break;
+      }
+
+      let q = supabase
+        .from(ORDERS_TABLE)
+        .select("order_id,raw_data,status");
       const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
-      if (scoped.skip) continue;
+      if (scoped.skip) break;
       q = scoped.nextQ;
 
       if (from && filterOrdersByCreatedAtInRange) {
@@ -2762,13 +2770,11 @@ async function getOrdersStatistics({
       if (to && filterOrdersByCreatedAtInRange) {
         q = q.lte("created_at", to.toISOString());
       }
-      q = applyStatsRawContains(q, breakdownDim, breakdownValue);
+      q = applyStatsRawContains(q);
       if (!useProductUuidContains) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
-      if (onlyOrderStatus) {
-        q = q.eq("status", onlyOrderStatus);
-      } else if (listStatusFilterNorm != null) {
+      if (listStatusFilterNorm != null) {
         const statuses =
           listStatusFilterNorm === "pending"
             ? ["new", "pending"]
@@ -2778,159 +2784,61 @@ async function getOrdersStatistics({
         q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
       }
 
-      let offset = 0;
-      for (;;) {
-        const { data, error } = await q.range(
-          offset,
-          offset + LOG_SELECT_PAGE_SIZE - 1,
-        );
-        if (error) throw new Error(error.message);
-        if (!data?.length) break;
-
-        for (const row of data) {
-          if (orderRowCountsForEmployeeScope(row, employeeScope)) {
-            sum += 1;
-          }
-        }
-
-        if (data.length < LOG_SELECT_PAGE_SIZE) break;
-        offset += LOG_SELECT_PAGE_SIZE;
-      }
-    }
-    return sum;
-  }
-
-  async function countWithChunks(statsKey) {
-    const dbStatuses = dbStatusesForStatsBucket(statsKey);
-    if (!dbStatuses.length) return 0;
-
-    if (
-      listStatusFilterNorm != null &&
-      !dbStatuses.includes(listStatusFilterNorm) &&
-      !(listStatusFilterNorm === "pending" && statsKey === "new")
-    ) {
-      return 0;
-    }
-
-    let sum = 0;
-    for (const chunk of chunks) {
-      let q = supabase.from(ORDERS_TABLE).select("order_id,raw_data,status");
-
-      const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
-      if (scoped.skip) continue;
-      q = scoped.nextQ;
-
-      if (from && filterOrdersByCreatedAtInRange) {
-        q = q.gte("created_at", from.toISOString());
-      }
-      if (to && filterOrdersByCreatedAtInRange) {
-        q = q.lte("created_at", to.toISOString());
-      }
-      q = applyStatsRawContains(q, null, null);
-      if (!useProductUuidContains) {
-        q = applyProductCartIlikeFilters(q, { product_id, product_sku });
-      }
-      q = q.in("status", dbStatuses);
-
-      let offset = 0;
-      for (;;) {
-        const { data, error } = await q.range(
-          offset,
-          offset + LOG_SELECT_PAGE_SIZE - 1,
-        );
-        if (error) throw new Error(error.message);
-        if (!data?.length) break;
-
-        for (const row of data) {
-          if (orderRowCountsForEmployeeScope(row, employeeScope)) {
-            sum += 1;
-          }
-        }
-
-        if (data.length < LOG_SELECT_PAGE_SIZE) break;
-        offset += LOG_SELECT_PAGE_SIZE;
-      }
-    }
-    return sum;
-  }
-
-  const byStatus = {};
-  for (const key of Object.keys(STATS_STATUS_KEYS)) {
-    byStatus[key] = await countWithChunks(key);
-  }
-
-  let totalOrders = 0;
-  for (const chunk of chunks) {
-    let q = supabase.from(ORDERS_TABLE).select("order_id,raw_data,status");
-
-    const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
-    if (scoped.skip) continue;
-    q = scoped.nextQ;
-
-    if (from && filterOrdersByCreatedAtInRange) {
-      q = q.gte("created_at", from.toISOString());
-    }
-    if (to && filterOrdersByCreatedAtInRange) {
-      q = q.lte("created_at", to.toISOString());
-    }
-    q = applyStatsRawContains(q, null, null);
-    if (!useProductUuidContains) {
-      q = applyProductCartIlikeFilters(q, { product_id, product_sku });
-    }
-    if (listStatusFilterNorm != null) {
-      const statuses =
-        listStatusFilterNorm === "pending"
-          ? ["new", "pending"]
-          : [listStatusFilterNorm];
-      q = q.in("status", statuses);
-    } else {
-      q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
-    }
-
-    let offset = 0;
-    for (;;) {
-      const { data, error } = await q.range(
-        offset,
-        offset + LOG_SELECT_PAGE_SIZE - 1,
-      );
+      const remaining = MAX_STATS_ROWS - rowCount;
+      const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+      const { data, error } = await q.range(offset, offset + pageSize - 1);
       if (error) throw new Error(error.message);
       if (!data?.length) break;
 
       for (const row of data) {
-        if (orderRowCountsForEmployeeScope(row, employeeScope)) {
-          totalOrders += 1;
+        if (!orderRowCountsForEmployeeScope(row, employeeScope)) {
+          continue;
         }
+        rowCount += 1;
+        totalOrders += 1;
+
+        const statusKey = statsBucketKeyFromDbStatus(row.status);
+        if (statusKey && Object.prototype.hasOwnProperty.call(byStatus, statusKey)) {
+          byStatus[statusKey] += 1;
+        }
+
+        const raw =
+          row.raw_data &&
+          typeof row.raw_data === "object" &&
+          !Array.isArray(row.raw_data)
+            ? row.raw_data
+            : {};
+
+        const src = String(raw.order_source ?? raw.orderSource ?? "")
+          .trim();
+        if (src && Object.prototype.hasOwnProperty.call(byOrderSource, src)) {
+          byOrderSource[src] += 1;
+        }
+
+        const typ = String(raw.order_type ?? raw.orderType ?? "")
+          .trim();
+        if (typ && Object.prototype.hasOwnProperty.call(byOrderType, typ)) {
+          byOrderType[typ] += 1;
+        }
+
+        if (String(row.status || "").trim() === "Shipped") {
+          const sh =
+            resolveEffectiveShippingStatus(raw) || "in_progress";
+          if (Object.prototype.hasOwnProperty.call(byShippingStatus, sh)) {
+            byShippingStatus[sh] += 1;
+          }
+        }
+
+        totalProductUnits += sumLineQuantitiesFromRaw(raw, {
+          productIdFilter: productIdForUnitSum,
+        });
+        total += pickOrderTotalCost(raw);
       }
 
-      if (data.length < LOG_SELECT_PAGE_SIZE) break;
-      offset += LOG_SELECT_PAGE_SIZE;
+      if (data.length < pageSize) break;
+      offset += pageSize;
     }
-  }
-
-  const byOrderSource = {};
-  for (const src of ORDER_SOURCES) {
-    byOrderSource[src] = await countAggregatedOrders("order_source", src);
-  }
-
-  const byOrderType = {};
-  for (const typ of ORDER_TYPES) {
-    byOrderType[typ] = await countAggregatedOrders("order_type", typ);
-  }
-
-  /** حالة الشحن في raw_data تُفترض in_progress عند الإنشاء — نحسبها فقط للطلبات المشحونة (status=Shipped). */
-  const byShippingStatus = {};
-  if (byStatus.Shipped > 0) {
-    for (const sh of SHIPPING_STATUSES) {
-      byShippingStatus[sh] = await countAggregatedOrders(
-        "shipping_status",
-        sh,
-        { onlyOrderStatus: "Shipped" },
-      );
-    }
-  } else {
-    for (const sh of SHIPPING_STATUSES) {
-      byShippingStatus[sh] = 0;
-    }
+    if (truncated) break;
   }
 
   const byOrderStatus = {
@@ -2949,59 +2857,6 @@ async function getOrdersStatistics({
     followUpOrders: byStatus.follow_up,
     repeaterOrders: byStatus.repeater,
   };
-
-  const productIdForUnitSum =
-    pidForStats && UUID_LIKE.test(pidForStats) ? pidForStats : null;
-
-  let totalProductUnits = 0;
-  let total = 0;
-  for (const chunk of chunks) {
-    let offset = 0;
-    for (;;) {
-      let q = supabase.from(ORDERS_TABLE).select("raw_data");
-      const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
-      if (scoped.skip) break;
-      q = scoped.nextQ;
-
-      if (from && filterOrdersByCreatedAtInRange) {
-        q = q.gte("created_at", from.toISOString());
-      }
-      if (to && filterOrdersByCreatedAtInRange) {
-        q = q.lte("created_at", to.toISOString());
-      }
-      q = applyStatsRawContains(q, null, null);
-      if (!useProductUuidContains) {
-        q = applyProductCartIlikeFilters(q, { product_id, product_sku });
-      }
-      if (listStatusFilterNorm != null) {
-        q = q.eq("status", listStatusFilterNorm);
-      }
-
-      q = q.range(offset, offset + LOG_SELECT_PAGE_SIZE - 1);
-      const { data, error } = await q;
-      if (error) throw new Error(error.message);
-      if (!data || data.length === 0) break;
-
-      for (const row of data) {
-        if (!orderRowCountsForEmployeeScope(row, employeeScope)) {
-          continue;
-        }
-        const raw =
-          row.raw_data &&
-          typeof row.raw_data === "object" &&
-          !Array.isArray(row.raw_data)
-            ? row.raw_data
-            : {};
-        totalProductUnits += sumLineQuantitiesFromRaw(raw, {
-          productIdFilter: productIdForUnitSum,
-        });
-        total += pickOrderTotalCost(raw);
-      }
-
-      if (data.length < LOG_SELECT_PAGE_SIZE) break;
-      offset += LOG_SELECT_PAGE_SIZE;
-    }
-  }
 
   const averageUnitsPerOrder =
     totalOrders > 0 ? totalProductUnits / totalOrders : null;
@@ -3031,8 +2886,23 @@ async function getOrdersStatistics({
     byOrderSource,
     byOrderType,
     byShippingStatus,
+    truncated,
+    maxRowsCap: MAX_STATS_ROWS,
   };
 }
+
+function statsBucketKeyFromDbStatus(status) {
+  const s = String(status || "").trim();
+  if (!s) return null;
+  if (s === "pending" || s === "new") return "new";
+  if (s === "follow up") return "follow_up";
+  for (const [key, dbStatus] of Object.entries(STATS_STATUS_KEYS)) {
+    if (dbStatus === s) return key;
+  }
+  return null;
+}
+
+const MAX_STATS_ROWS = 50000;
 
 const MAX_ANALYTICS_ROWS = 50000;
 
