@@ -148,6 +148,14 @@ function toPresentation(payload) {
     order.customerStatus,
   ) || "pending";
 
+  const confirmationStatus = firstNonEmptyString(
+    payload.confirmation_status,
+    order.confirmation_status,
+    payload.confirmationStatus,
+    order.confirmationStatus,
+    customerStatus === "canceled" ? "cancelled" : customerStatus,
+  ) || "pending";
+
   const easyConfirm =
     payload.easyConfirm && typeof payload.easyConfirm === "object"
       ? payload.easyConfirm
@@ -160,6 +168,19 @@ function toPresentation(payload) {
     shortId: order.short_id,
     status: order.status,
     customerStatus,
+    confirmationStatus,
+    confirmationSource: firstNonEmptyString(
+      payload.confirmation_source,
+      order.confirmation_source,
+      payload.confirmationSource,
+      order.confirmationSource,
+    ) || null,
+    confirmationUpdatedAt: firstNonEmptyString(
+      payload.confirmation_updated_at,
+      order.confirmation_updated_at,
+      payload.confirmationUpdatedAt,
+      order.confirmationUpdatedAt,
+    ) || null,
     easyConfirm,
     timeline: {
       createdAt: order.created_at,
@@ -214,6 +235,7 @@ function toPresentation(payload) {
       orderType: orderType || null,
       shippingStatus: shippingStatus || null,
       customerStatus,
+      confirmationStatus,
     },
   };
 }

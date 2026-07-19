@@ -13,6 +13,7 @@ module.exports = {
     baseUrl:
       process.env.EASYCONFIRM_API_BASE_URL ||
       "https://api.easyconfirm.net/api/v1",
+    webhookSecret: process.env.EASYCONFIRM_WEBHOOK_SECRET,
   },
 
   bosta: {

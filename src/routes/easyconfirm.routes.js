@@ -2,15 +2,15 @@ const express = require("express");
 const router = express.Router();
 
 const {
-  handleEasyConfirmWebhook,
+  handleEasyConfirmDebug,
 } = require("../controllers/easyconfirm.controller");
 
 /**
- * EasyConfirm WhatsApp confirmation / cancellation webhooks.
- * Mounted at /webhooks — fully isolated from EasyOrders / Bosta webhook handlers.
- *
- * POST /webhooks/easyconfirm
+ * EasyConfirm diagnostic GETs (JSON-parsed routes).
+ * POST /webhooks/easyconfirm is registered in server.js with express.raw
+ * BEFORE express.json().
  */
-router.post("/easyconfirm", handleEasyConfirmWebhook);
+router.get("/easyconfirm/debug/:externalOrderId", handleEasyConfirmDebug);
+router.get("/easyconfirm/debug", handleEasyConfirmDebug);
 
 module.exports = router;
