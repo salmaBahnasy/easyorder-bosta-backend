@@ -48,13 +48,19 @@ const {
   getEgyptMonthToDateRange,
   isEasyOrderApiRequest,
   resolveSingleDayFromQueryValue,
+  TREND_GRANULARITY_OPTIONS,
+  TREND_GRANULARITY_VALUES,
+  normalizeTrendGranularity,
 } = require("../utils/dateRange");
 const {
   saveOrderCostDailyEntry,
   getOrderCostChartFromStorage,
 } = require("../services/orderCostDaily.service");
 const { withCache } = require("../services/dashboardCache.service");
-const { buildOrdersExcelBuffer } = require("../services/ordersExport.service");
+const {
+  buildOrdersExcelBuffer,
+  buildOrdersTrendExcelBuffer,
+} = require("../services/ordersExport.service");
 
 /** مثال لجسم POST /api/orders — الحقول الاختيارية: order_source (افتراضي store)، order_type (افتراضي new)، shipping_status (افتراضي in_progress)، status (افتراضي new). */
 const POST_ORDER_MANUAL_EXAMPLE = {
@@ -125,6 +131,42 @@ function optionalQueryParam(value) {
   const raw = Array.isArray(value) ? value[0] : value;
   const s = String(raw).trim();
   return s === "" ? undefined : s;
+}
+
+function readTrendGranularityParam(req) {
+  return optionalQueryParam(
+    req.query.granularity ||
+      req.query.period ||
+      req.query.interval ||
+      req.query.trend,
+  );
+}
+
+function resolveTrendGranularityOrReply(req, res) {
+  const granRaw = readTrendGranularityParam(req);
+  const granularity = normalizeTrendGranularity(granRaw);
+  if (!granularity) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid granularity filter",
+      allowedGranularities: TREND_GRANULARITY_VALUES,
+      options: TREND_GRANULARITY_OPTIONS,
+    });
+    return null;
+  }
+  return granularity;
+}
+
+function trendFilterLists() {
+  return {
+    ...getOrdersFilterLists(),
+    granularity: {
+      key: "granularity",
+      aliases: ["period", "interval"],
+      labelAr: "الفترة",
+      options: TREND_GRANULARITY_OPTIONS,
+    },
+  };
 }
 
 function getDefaultDateRange() {
@@ -1343,155 +1385,208 @@ async function getOrdersStats(req, res) {
  * GET /api/orders/analytics — aggregated report: required product (UUID), optional
  * employee, optional created_at range.
  */
-/**
- * GET /api/orders/stats/trend — time-series for charts (5 KPIs per bucket).
- * Default from/to: current calendar month. Same filters as /stats (employee, product, meta).
- */
-async function getOrdersStatsTrend(req, res) {
+async function resolveOrdersTrendContext(req, res) {
+  const employeeId = normalizeQueryId(
+    req.query.employeeId || req.query.userId || req.query.employee_id,
+  );
+  const employee_scope = normalizeQueryId(
+    req.query.employee_scope || req.query.employeeScope,
+  );
+  const ignoreEmployeeLogDateRange =
+    employee_scope === "all" ||
+    employee_scope === "any" ||
+    employee_scope === "all_time";
+
+  const status = optionalQueryParam(req.query.status);
+  const order_source = optionalQueryParam(
+    req.query.order_source || req.query.orderSource,
+  );
+  const order_type = optionalQueryParam(
+    req.query.order_type || req.query.orderType,
+  );
+  const shipping_status = optionalQueryParam(
+    req.query.shipping_status || req.query.shippingStatus,
+  );
+  const easyorder_id = optionalQueryParam(
+    req.query.easyorder_id || req.query.easyorderId,
+  );
+  const product_id =
+    optionalQueryParam(req.query.product_id || req.query.productId) ||
+    easyorder_id;
+  const product_sku = optionalQueryParam(
+    req.query.product_sku || req.query.productSku,
+  );
+
+  const granularity = resolveTrendGranularityOrReply(req, res);
+  if (!granularity) return null;
+
+  if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid status filter",
+      allowedStatuses: ALLOWED_ORDER_STATUSES,
+    });
+    return null;
+  }
+
+  if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid order_source filter",
+      allowedOrderSources: ORDER_SOURCES,
+    });
+    return null;
+  }
+
+  if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid order_type filter",
+      allowedOrderTypes: ORDER_TYPES,
+    });
+    return null;
+  }
+
+  if (
+    shipping_status &&
+    !SHIPPING_STATUSES.includes(String(shipping_status).trim())
+  ) {
+    res.status(400).json({
+      success: false,
+      message: "Invalid shipping_status filter",
+      allowedShippingStatuses: SHIPPING_STATUSES,
+    });
+    return null;
+  }
+
+  let from;
+  let to;
   try {
-    const employeeId = normalizeQueryId(
-      req.query.employeeId || req.query.userId || req.query.employee_id,
-    );
-    const employee_scope = normalizeQueryId(
-      req.query.employee_scope || req.query.employeeScope,
-    );
-    const ignoreEmployeeLogDateRange =
-      employee_scope === "all" ||
-      employee_scope === "any" ||
-      employee_scope === "all_time";
-
-    const status = optionalQueryParam(req.query.status);
-    const order_source = optionalQueryParam(
-      req.query.order_source || req.query.orderSource,
-    );
-    const order_type = optionalQueryParam(
-      req.query.order_type || req.query.orderType,
-    );
-    const shipping_status = optionalQueryParam(
-      req.query.shipping_status || req.query.shippingStatus,
-    );
-    const easyorder_id = optionalQueryParam(
-      req.query.easyorder_id || req.query.easyorderId,
-    );
-    const product_id =
-      optionalQueryParam(req.query.product_id || req.query.productId) ||
-      easyorder_id;
-    const product_sku = optionalQueryParam(
-      req.query.product_sku || req.query.productSku,
-    );
-
-    const granRaw = optionalQueryParam(req.query.granularity);
-    const granularity =
-      granRaw === "week" || granRaw === "month" ? granRaw : "day";
-
-    if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid status filter",
-        allowedStatuses: ALLOWED_ORDER_STATUSES,
-      });
-      return;
+    ({ from, to } = resolveOrdersTrendDateRange(req));
+  } catch (error) {
+    if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+      res.status(400).json({ success: false, message: error.message });
+      return null;
     }
+    throw error;
+  }
 
-    if (order_source && !ORDER_SOURCES.includes(String(order_source).trim())) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid order_source filter",
-        allowedOrderSources: ORDER_SOURCES,
-      });
-      return;
-    }
-
-    if (order_type && !ORDER_TYPES.includes(String(order_type).trim())) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid order_type filter",
-        allowedOrderTypes: ORDER_TYPES,
-      });
-      return;
-    }
-
-    if (
-      shipping_status &&
-      !SHIPPING_STATUSES.includes(String(shipping_status).trim())
-    ) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid shipping_status filter",
-        allowedShippingStatuses: SHIPPING_STATUSES,
-      });
-      return;
-    }
-
-    let from;
-    let to;
-    try {
-      ({ from, to } = resolveOrdersTrendDateRange(req));
-    } catch (error) {
-      if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
-        res.status(400).json({ success: false, message: error.message });
-        return;
-      }
-      throw error;
-    }
-
-    const chart = await withCache(
-      "orders-stats-trend",
-      {
+  const useEgyptBuckets = isEasyOrderApiRequest(req);
+  const chart = await withCache(
+    "orders-stats-trend",
+    {
+      employeeId,
+      ignoreEmployeeLogDateRange,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      granularity,
+      order_source,
+      order_type,
+      shipping_status,
+      status,
+      product_id,
+      product_sku,
+      useEgyptBuckets,
+    },
+    () =>
+      getOrdersStatsTimeSeries({
+        from,
+        to,
+        granularity,
         employeeId,
         ignoreEmployeeLogDateRange,
-        from: from.toISOString(),
-        to: to.toISOString(),
-        granularity,
         order_source,
         order_type,
         shipping_status,
         status,
         product_id,
         product_sku,
-        useEgyptBuckets: isEasyOrderApiRequest(req),
-      },
-      () =>
-        getOrdersStatsTimeSeries({
-          from,
-          to,
-          granularity,
-          employeeId,
-          ignoreEmployeeLogDateRange,
-          order_source,
-          order_type,
-          shipping_status,
-          status,
-          product_id,
-          product_sku,
-          useEgyptBuckets: isEasyOrderApiRequest(req),
-        }),
-    ).then((r) => r.value);
+        useEgyptBuckets,
+      }),
+  ).then((r) => r.value);
+
+  return {
+    chart,
+    granularity,
+    filters: {
+      employeeId,
+      employee_scope: employee_scope || null,
+      ignoreEmployeeLogDateRange,
+      from: from.toISOString(),
+      to: to.toISOString(),
+      granularity,
+      status: status || null,
+      order_source: order_source || null,
+      order_type: order_type || null,
+      shipping_status: shipping_status || null,
+      product_id: product_id || null,
+      easyorder_id: easyorder_id || null,
+      product_sku: product_sku || null,
+      period: granularity,
+    },
+  };
+}
+
+/**
+ * GET /api/orders/stats/trend — time-series for charts (5 KPIs per bucket).
+ * Default from/to: current calendar month. Same filters as /stats (employee, product, meta).
+ */
+async function getOrdersStatsTrend(req, res) {
+  try {
+    const result = await resolveOrdersTrendContext(req, res);
+    if (!result) return;
 
     res.json({
       success: true,
-      filters: {
-        employeeId,
-        employee_scope: employee_scope || null,
-        ignoreEmployeeLogDateRange,
-        from: from.toISOString(),
-        to: to.toISOString(),
-        granularity,
-        status: status || null,
-        order_source: order_source || null,
-        order_type: order_type || null,
-        shipping_status: shipping_status || null,
-        product_id: product_id || null,
-        easyorder_id: easyorder_id || null,
-        product_sku: product_sku || null,
-      },
-      chart,
-      filterLists: getOrdersFilterLists(),
+      filters: result.filters,
+      chart: result.chart,
+      filterLists: trendFilterLists(),
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: "Failed to build orders stats trend",
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * GET /api/orders/stats/trend/export
+ * GET /api/easyorder/orders/stats/trend/export
+ * Same query filters as /stats/trend — returns Excel (.xlsx).
+ */
+async function exportOrdersStatsTrend(req, res) {
+  try {
+    const result = await resolveOrdersTrendContext(req, res);
+    if (!result) return;
+
+    const buffer = buildOrdersTrendExcelBuffer(
+      result.chart,
+      result.granularity,
+    );
+    const dateKey = getEgyptCalendarDateKey(new Date()) || "export";
+    const filename = `orders-trend-${result.granularity}-${dateKey}.xlsx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"`,
+    );
+    res.setHeader(
+      "X-Export-Rows",
+      String(Array.isArray(result.chart?.points) ? result.chart.points.length : 0),
+    );
+    res.setHeader("X-Export-Granularity", result.granularity);
+
+    res.send(buffer);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to export orders stats trend",
       error: error.message,
     });
   }
@@ -1619,9 +1714,8 @@ async function getProductSalesChartHandler(req, res) {
       optionalQueryParam(req.query.product_id || req.query.productId) ||
       easyorder_id;
 
-    const granRaw = optionalQueryParam(req.query.granularity);
-    const granularity =
-      granRaw === "week" || granRaw === "month" ? granRaw : "day";
+    const granularity = resolveTrendGranularityOrReply(req, res);
+    if (!granularity) return;
 
     let from;
     let to;
@@ -1821,9 +1915,8 @@ async function saveOrderCostDailyHandler(req, res) {
  */
 async function getOrderCostChartHandler(req, res) {
   try {
-    const granRaw = optionalQueryParam(req.query.granularity);
-    const granularity =
-      granRaw === "week" || granRaw === "month" ? granRaw : "day";
+    const granularity = resolveTrendGranularityOrReply(req, res);
+    if (!granularity) return;
 
     const dateBasisRaw = optionalQueryParam(
       req.query.date_basis || req.query.dateBasis,
@@ -1899,6 +1992,7 @@ module.exports = {
   refreshCustomerStatus,
   getOrdersStats,
   getOrdersStatsTrend,
+  exportOrdersStatsTrend,
   getOrdersAnalytics,
   getProductSalesChartHandler,
   getOrderCosts,

@@ -223,6 +223,40 @@ function listEgyptTrendBucketKeys(from, to, granularity = "day") {
   return keys;
 }
 
+const TREND_GRANULARITY_OPTIONS = [
+  { value: "day", labelAr: "يومي" },
+  { value: "week", labelAr: "أسبوعي" },
+  { value: "month", labelAr: "شهري" },
+];
+
+const TREND_GRANULARITY_VALUES = TREND_GRANULARITY_OPTIONS.map((o) => o.value);
+
+const TREND_GRANULARITY_ALIASES = {
+  day: "day",
+  daily: "day",
+  يومي: "day",
+  week: "week",
+  weekly: "week",
+  اسبوعي: "week",
+  أسبوعي: "week",
+  month: "month",
+  monthly: "month",
+  شهري: "month",
+};
+
+/**
+ * day | week | month from query (granularity / period / interval).
+ * Empty → day. Unknown value → null (caller should 400).
+ */
+function normalizeTrendGranularity(value) {
+  if (value == null) return "day";
+  const raw = String(Array.isArray(value) ? value[0] : value)
+    .trim()
+    .toLowerCase();
+  if (!raw) return "day";
+  return TREND_GRANULARITY_ALIASES[raw] || null;
+}
+
 function isEasyOrderApiRequest(req) {
   const original = String(req.originalUrl || req.url || "");
   const base = String(req.baseUrl || "");
@@ -291,4 +325,7 @@ module.exports = {
   egyptLocalToUtc,
   isEasyOrderApiRequest,
   resolveEasyOrderDateRange,
+  TREND_GRANULARITY_OPTIONS,
+  TREND_GRANULARITY_VALUES,
+  normalizeTrendGranularity,
 };

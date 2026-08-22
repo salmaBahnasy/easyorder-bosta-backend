@@ -90,6 +90,66 @@ function orderToExportRow(order) {
   };
 }
 
+const TREND_PERIOD_LABELS = {
+  day: "يومي",
+  week: "أسبوعي",
+  month: "شهري",
+};
+
+function formatTrendNumber(value, digits = 2) {
+  if (value == null || value === "") return "";
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  return Math.round(n * 10 ** digits) / 10 ** digits;
+}
+
+function trendPointToExportRow(point, granularity) {
+  return {
+    التاريخ: point?.date ?? "",
+    الفترة: TREND_PERIOD_LABELS[granularity] || granularity || "",
+    "إجمالي الطلبات": Number(point?.totalOrders) || 0,
+    "تم الشحن": Number(point?.shippedOrders) || 0,
+    الناجحة: Number(point?.successfulOrders) || 0,
+    الإجمالي: formatTrendNumber(point?.total),
+    "كمية المنتجات": Number(point?.totalProductUnits) || 0,
+    "متوسط القطع للطلب": formatTrendNumber(point?.averageUnitsPerOrder),
+    "متوسط قيمة الطلب": formatTrendNumber(point?.averageOrderValue),
+  };
+}
+
+function buildOrdersTrendExcelBuffer(chart, granularity = "day") {
+  const points = Array.isArray(chart?.points) ? chart.points : [];
+  const rows = points.map((point) => trendPointToExportRow(point, granularity));
+  if (chart?.summary && typeof chart.summary === "object") {
+    rows.push({
+      ...trendPointToExportRow(
+        { ...chart.summary, date: "الإجمالي" },
+        granularity,
+      ),
+    });
+  }
+  if (!rows.length) {
+    rows.push(trendPointToExportRow({ date: "" }, granularity));
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  worksheet["!cols"] = [
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 16 },
+    { wch: 12 },
+    { wch: 12 },
+    { wch: 14 },
+    { wch: 16 },
+    { wch: 20 },
+    { wch: 20 },
+  ];
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Trend");
+  return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+}
+
 function buildOrdersExcelBuffer(orders) {
   const rows = (orders || []).map(orderToExportRow);
   const worksheet = XLSX.utils.json_to_sheet(
@@ -126,4 +186,5 @@ function buildOrdersExcelBuffer(orders) {
 module.exports = {
   orderToExportRow,
   buildOrdersExcelBuffer,
+  buildOrdersTrendExcelBuffer,
 };

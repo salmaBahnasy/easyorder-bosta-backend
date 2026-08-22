@@ -11,6 +11,7 @@ const {
   refreshCustomerStatus,
   getOrdersStats,
   getOrdersStatsTrend,
+  exportOrdersStatsTrend,
   getOrdersAnalytics,
   getProductSalesChartHandler,
   getOrderCosts,
@@ -24,6 +25,8 @@ const {
 } = require("../controllers/bostaFulfillment.controller");
 const { requireAuth, optionalAuth } = require("../middlewares/auth.middleware");
 
+router.get("/stats/trend/export", requireAuth, exportOrdersStatsTrend);
+router.post("/stats/trend/export", requireAuth, exportOrdersStatsTrend);
 router.get("/stats/trend", getOrdersStatsTrend);
 router.get("/stats", getOrdersStats);
 router.get("/analytics", getOrdersAnalytics);
