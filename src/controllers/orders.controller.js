@@ -22,6 +22,7 @@ const {
   normalizeCustomerStatusInput,
 } = require("../services/webhookOrders.service");
 const { toPresentation, withCustomerConfirmation } = require("../services/easyorderPresentation.service");
+const { isShopifyOrder } = require("../services/shopify.service");
 
 /**
  * Sync WhatsApp confirmation status from EasyOrders API (order.status).
@@ -1014,6 +1015,15 @@ async function getEasyOrderDetails(req, res) {
       return;
     }
 
+    if (isShopifyOrder({ id: orderId, sourceOrderId: orderId })) {
+      res.status(404).json({
+        success: false,
+        message: "Order not found",
+        orderId,
+      });
+      return;
+    }
+
     const orderDetails = await easyorderService.getOrderById(orderId);
     const remoteBase =
       orderDetails?.data && typeof orderDetails.data === "object"
@@ -1128,6 +1138,19 @@ async function refreshCustomerStatus(req, res) {
       res.status(error.statusCode || 404).json({
         success: false,
         message: error.message || "Order not found",
+        orderId: req.params.orderId,
+      });
+      return;
+    }
+
+    if (
+      error.code === "MANUAL_ORDER_NO_REFRESH" ||
+      error.code === "SHOPIFY_ORDER_NO_REFRESH"
+    ) {
+      res.status(error.statusCode || 400).json({
+        success: false,
+        message: error.message,
+        code: error.code,
         orderId: req.params.orderId,
       });
       return;

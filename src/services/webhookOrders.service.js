@@ -14,6 +14,7 @@ const {
   allocateNextOrderReference,
 } = require("../utils/orderReference");
 const { normalizePaymentMethod } = require("../utils/paymentMethod");
+const { isShopifyOrder } = require("./shopify.service");
 
 const ALLOWED_ORDER_STATUSES = [
   "canceled",
@@ -1664,7 +1665,7 @@ async function addWebhookOrder(order, options = {}) {
 
   // Preserve EasyOrders WhatsApp status separately — raw_data.status becomes ERP status below.
   const incomingEasyOrdersStatus = normalizeMetaString(order?.status);
-  if (fromWebhook && incomingEasyOrdersStatus) {
+  if (fromWebhook && incomingEasyOrdersStatus && !isShopifyOrder(order)) {
     raw_data.easyorders_status = incomingEasyOrdersStatus;
     raw_data.easyOrdersStatus = incomingEasyOrdersStatus;
   } else if (
@@ -1687,7 +1688,7 @@ async function addWebhookOrder(order, options = {}) {
 
   // Preserve EasyOrders WhatsApp status separately (ERP status overwrites raw_data.status)
   const easyOrdersStatusRaw = normalizeMetaString(order?.status);
-  if (easyOrdersStatusRaw) {
+  if (easyOrdersStatusRaw && !isShopifyOrder(order)) {
     raw_data.easyorders_status = easyOrdersStatusRaw;
     raw_data.easyOrdersStatus = easyOrdersStatusRaw;
   }

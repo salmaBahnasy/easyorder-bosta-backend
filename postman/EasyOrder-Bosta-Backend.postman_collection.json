@@ -372,6 +372,20 @@
           }
         },
         {
+          "name": "Shopify order webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Shopify-Topic", "value": "orders/create" },
+              { "key": "X-Shopify-Hmac-Sha256", "value": "" },
+              { "key": "X-Shopify-Shop-Domain", "value": "your-shop.myshopify.com" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/webhooks/shopify/orders"
+          }
+        },
+        {
           "name": "List webhook orders (internal)",
           "request": {
             "method": "GET",

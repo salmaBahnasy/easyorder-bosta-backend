@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { isShopifyOrder } = require("./shopify.service");
 
 const EASYORDER_API_BASE =
   process.env.EASYORDER_API_BASE_URL ||
@@ -73,6 +74,11 @@ async function enrichOrderWithEasyOrdersCustomerStatus(order, options = {}) {
       },
       easyOrdersConfirm: null,
     };
+  }
+
+  // Shopify orders live in the same table but are not EasyOrders records
+  if (isShopifyOrder(order)) {
+    return { order, easyOrdersConfirm: null };
   }
 
   const syncLocal = options.syncLocal !== false;
@@ -206,6 +212,15 @@ async function refreshCustomerStatusFromEasyOrders(orderId) {
       "Manual orders keep customerStatus=confirmed and cannot be refreshed from EasyOrders",
     );
     err.code = "MANUAL_ORDER_NO_REFRESH";
+    err.statusCode = 400;
+    throw err;
+  }
+
+  if (isShopifyOrder(localOrder)) {
+    const err = new Error(
+      "Shopify orders cannot be refreshed from EasyOrders",
+    );
+    err.code = "SHOPIFY_ORDER_NO_REFRESH";
     err.statusCode = 400;
     throw err;
   }

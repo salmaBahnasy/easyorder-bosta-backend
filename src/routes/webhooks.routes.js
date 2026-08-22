@@ -9,10 +9,19 @@ const {
   handleBostaOrderStatusWebhook,
 } = require("../controllers/bostaFulfillment.controller");
 const {
+  handleShopifyWebhook,
+} = require("../controllers/shopify.controller");
+const {
   toPresentation,
 } = require("../services/easyorderPresentation.service");
 
 router.post("/bosta/order-status", handleBostaOrderStatusWebhook);
+
+router.post("/shopify", handleShopifyWebhook);
+router.post("/shopify/orders", handleShopifyWebhook);
+router.post("/shopify/orders/create", handleShopifyWebhook);
+router.post("/shopify/orders/updated", handleShopifyWebhook);
+router.post("/shopify/orders/cancelled", handleShopifyWebhook);
 
 router.post("/easyorders/order-created", async (req, res) => {
   try {

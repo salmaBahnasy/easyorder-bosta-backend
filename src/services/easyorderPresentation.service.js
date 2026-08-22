@@ -130,6 +130,14 @@ function toPresentation(payload) {
     payload.order_source,
     payload.orderSource,
   );
+  const platform = firstNonEmptyString(
+    order.platform,
+    order.order_platform,
+    order.orderPlatform,
+    payload.platform,
+    payload.order_platform,
+    payload.orderPlatform,
+  );
   const orderType = firstNonEmptyString(
     order.order_type,
     order.orderType,
@@ -247,11 +255,13 @@ function toPresentation(payload) {
     tracking: formatTracking(order.metadata),
     storeId: order.store_id,
     guestId: order.guest_id,
+    platform: platform || null,
     orderMeta: {
       orderSource: orderSource || null,
       orderType: orderType || null,
       shippingStatus: shippingStatus || null,
       customerStatus,
+      platform: platform || null,
     },
   };
 }

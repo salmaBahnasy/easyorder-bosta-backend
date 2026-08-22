@@ -75,6 +75,7 @@ function orderToExportRow(order) {
     "حالة الطلب": order.status ?? order.orderStatus ?? "",
     "حالة العميل": order.customer_status ?? order.customerStatus ?? "pending",
     "مصدر الطلب": order.order_source ?? order.orderSource ?? "",
+    "المنصة": order.platform ?? order.order_platform ?? order.orderPlatform ?? "",
     "نوع الطلب": order.order_type ?? order.orderType ?? "",
     "حالة الشحن": order.shipping_status ?? order.shippingStatus ?? "",
     "الإجمالي": formatMoney(

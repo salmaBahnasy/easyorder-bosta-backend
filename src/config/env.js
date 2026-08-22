@@ -17,4 +17,9 @@ module.exports = {
     webhookUrl: process.env.BOSTA_WEBHOOK_URL,
     fulfillmentApiKey: process.env.BOSTA_FULFILLMENT_API_KEY,
   },
+
+  shopify: {
+    webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET,
+    shopDomain: process.env.SHOPIFY_SHOP_DOMAIN,
+  },
 };
