@@ -20,6 +20,7 @@ const {
   getOrdersFilterLists,
   normalizeOrderStatusInput,
   normalizeCustomerStatusInput,
+  normalizeProductIdList,
 } = require("../services/webhookOrders.service");
 const { toPresentation, withCustomerConfirmation } = require("../services/easyorderPresentation.service");
 const { isShopifyOrder } = require("../services/shopify.service");
@@ -324,6 +325,21 @@ function resolveOrderCostChartDateRange(req) {
   }
 
   return resolveOrdersTrendDateRange(req);
+}
+
+function parseProductIdsFromRequest(req) {
+  const source = mergeOrdersFilterSource(req);
+  return normalizeProductIdList(
+    source.product_ids,
+    source["product_ids[]"],
+    source.productIds,
+    source.easyorder_ids,
+    source.easyorderIds,
+    source.product_id,
+    source.productId,
+    source.easyorder_id,
+    source.easyorderId,
+  );
 }
 
 function mergeOrdersFilterSource(req) {
@@ -1407,12 +1423,9 @@ async function resolveOrdersTrendContext(req, res) {
   const shipping_status = optionalQueryParam(
     req.query.shipping_status || req.query.shippingStatus,
   );
-  const easyorder_id = optionalQueryParam(
-    req.query.easyorder_id || req.query.easyorderId,
-  );
-  const product_id =
-    optionalQueryParam(req.query.product_id || req.query.productId) ||
-    easyorder_id;
+  const productIds = parseProductIdsFromRequest(req);
+  const easyorder_id = productIds[0] || null;
+  const product_id = productIds[0] || null;
   const product_sku = optionalQueryParam(
     req.query.product_sku || req.query.productSku,
   );
@@ -1484,7 +1497,7 @@ async function resolveOrdersTrendContext(req, res) {
       order_type,
       shipping_status,
       status,
-      product_id,
+      product_id: productIds,
       product_sku,
       useEgyptBuckets,
     },
@@ -1499,7 +1512,7 @@ async function resolveOrdersTrendContext(req, res) {
         order_type,
         shipping_status,
         status,
-        product_id,
+        product_id: productIds,
         product_sku,
         useEgyptBuckets,
       }),
@@ -1520,6 +1533,7 @@ async function resolveOrdersTrendContext(req, res) {
       order_type: order_type || null,
       shipping_status: shipping_status || null,
       product_id: product_id || null,
+      product_ids: productIds,
       easyorder_id: easyorder_id || null,
       product_sku: product_sku || null,
       period: granularity,
@@ -1707,12 +1721,9 @@ async function getOrdersAnalytics(req, res) {
  */
 async function getProductSalesChartHandler(req, res) {
   try {
-    const easyorder_id = optionalQueryParam(
-      req.query.easyorder_id || req.query.easyorderId,
-    );
-    const product_id =
-      optionalQueryParam(req.query.product_id || req.query.productId) ||
-      easyorder_id;
+    const productIds = parseProductIdsFromRequest(req);
+    const product_id = productIds.length === 1 ? productIds[0] : null;
+    const easyorder_id = productIds[0] || null;
 
     const granularity = resolveTrendGranularityOrReply(req, res);
     if (!granularity) return;
@@ -1733,7 +1744,8 @@ async function getProductSalesChartHandler(req, res) {
       from,
       to,
       granularity,
-      product_id,
+      product_id: productIds,
+      product_ids: productIds,
       useEgyptBuckets: isEasyOrderApiRequest(req),
     });
 
@@ -1744,6 +1756,7 @@ async function getProductSalesChartHandler(req, res) {
         to: to.toISOString(),
         granularity,
         product_id: product_id || null,
+        product_ids: productIds,
         easyorder_id: easyorder_id || null,
       },
       chart,

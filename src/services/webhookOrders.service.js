@@ -1823,37 +1823,123 @@ function applyRawDataMetaContains(query, {
   return q;
 }
 
+const MAX_PRODUCT_FILTER_IDS = 50;
+const MAX_PRODUCT_UUID_CONTAINS_IDS = 8;
+
+function normalizeProductIdList(...values) {
+  const ids = [];
+  const seen = new Set();
+
+  function push(value) {
+    if (value == null) return;
+    if (Array.isArray(value)) {
+      value.forEach(push);
+      return;
+    }
+    String(value)
+      .split(/[,|]/)
+      .forEach((part) => {
+        const id = normalizeProductIdForCartFilter(part);
+        if (!id) return;
+        const key = id.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        ids.push(id);
+      });
+  }
+
+  values.forEach(push);
+  return ids.slice(0, MAX_PRODUCT_FILTER_IDS);
+}
+
+function productUuidContainsFragments(productUuid) {
+  const id = normalizeProductIdForCartFilter(productUuid);
+  if (!id || !UUID_LIKE.test(id)) return [];
+  const e = escapePostgrestJsonStringForCsFragment(id);
+  return [
+    `raw_data.cs.{"cart_items":[{"product_id":"${e}"}]}`,
+    `raw_data.cs.{"cart_items":[{"productId":"${e}"}]}`,
+    `raw_data.cs.{"cart_items":[{"id":"${e}"}]}`,
+    `raw_data.cs.{"cart_items":[{"easyorder_id":"${e}"}]}`,
+    `raw_data.cs.{"cart_items":[{"easyorderId":"${e}"}]}`,
+    `raw_data.cs.{"cart_items":[{"product":{"id":"${e}"}}]}`,
+    `raw_data.cs.{"cart_items":[{"product":{"product_id":"${e}"}}]}`,
+    `raw_data.cs.{"cart_items":[{"product":{"productId":"${e}"}}]}`,
+    `raw_data.cs.{"cart_items":[{"product":{"easyorder_id":"${e}"}}]}`,
+    `raw_data.cs.{"cart_items":[{"product":{"easyorderId":"${e}"}}]}`,
+    `raw_data.cs.{"cartItems":[{"product_id":"${e}"}]}`,
+    `raw_data.cs.{"cartItems":[{"productId":"${e}"}]}`,
+    `raw_data.cs.{"cartItems":[{"id":"${e}"}]}`,
+    `raw_data.cs.{"cartItems":[{"easyorder_id":"${e}"}]}`,
+    `raw_data.cs.{"cartItems":[{"easyorderId":"${e}"}]}`,
+    `raw_data.cs.{"cartItems":[{"product":{"id":"${e}"}}]}`,
+    `raw_data.cs.{"cartItems":[{"product":{"product_id":"${e}"}}]}`,
+    `raw_data.cs.{"cartItems":[{"product":{"productId":"${e}"}}]}`,
+    `raw_data.cs.{"cartItems":[{"product":{"easyorder_id":"${e}"}}]}`,
+    `raw_data.cs.{"cartItems":[{"product":{"easyorderId":"${e}"}}]}`,
+  ];
+}
+
 /**
  * فلتر منتج UUID في cart_items / cartItems — استعلام واحد بدل جمع آلاف order_id في URL.
  */
 function applyProductUuidCartContainsOr(query, productUuid) {
-  const id = normalizeProductIdForCartFilter(productUuid);
-  if (!id || !UUID_LIKE.test(id)) return query;
-  const e = escapePostgrestJsonStringForCsFragment(id);
-  return query.or(
-    [
-      `raw_data.cs.{"cart_items":[{"product_id":"${e}"}]}`,
-      `raw_data.cs.{"cart_items":[{"productId":"${e}"}]}`,
-      `raw_data.cs.{"cart_items":[{"id":"${e}"}]}`,
-      `raw_data.cs.{"cart_items":[{"easyorder_id":"${e}"}]}`,
-      `raw_data.cs.{"cart_items":[{"easyorderId":"${e}"}]}`,
-      `raw_data.cs.{"cart_items":[{"product":{"id":"${e}"}}]}`,
-      `raw_data.cs.{"cart_items":[{"product":{"product_id":"${e}"}}]}`,
-      `raw_data.cs.{"cart_items":[{"product":{"productId":"${e}"}}]}`,
-      `raw_data.cs.{"cart_items":[{"product":{"easyorder_id":"${e}"}}]}`,
-      `raw_data.cs.{"cart_items":[{"product":{"easyorderId":"${e}"}}]}`,
-      `raw_data.cs.{"cartItems":[{"product_id":"${e}"}]}`,
-      `raw_data.cs.{"cartItems":[{"productId":"${e}"}]}`,
-      `raw_data.cs.{"cartItems":[{"id":"${e}"}]}`,
-      `raw_data.cs.{"cartItems":[{"easyorder_id":"${e}"}]}`,
-      `raw_data.cs.{"cartItems":[{"easyorderId":"${e}"}]}`,
-      `raw_data.cs.{"cartItems":[{"product":{"id":"${e}"}}]}`,
-      `raw_data.cs.{"cartItems":[{"product":{"product_id":"${e}"}}]}`,
-      `raw_data.cs.{"cartItems":[{"product":{"productId":"${e}"}}]}`,
-      `raw_data.cs.{"cartItems":[{"product":{"easyorder_id":"${e}"}}]}`,
-      `raw_data.cs.{"cartItems":[{"product":{"easyorderId":"${e}"}}]}`,
-    ].join(","),
-  );
+  const fragments = productUuidContainsFragments(productUuid);
+  if (!fragments.length) return query;
+  return query.or(fragments.join(","));
+}
+
+function applyProductUuidCartContainsAny(query, productIds) {
+  const fragments = [];
+  for (const id of productIds || []) {
+    fragments.push(...productUuidContainsFragments(id));
+  }
+  if (!fragments.length) return query;
+  return query.or(fragments.join(","));
+}
+
+function applyProductCartIlikeAny(query, { product_ids, product_sku }) {
+  const needles = [
+    ...(Array.isArray(product_ids) ? product_ids : []),
+    product_sku,
+  ]
+    .map((value) =>
+      value == null ? "" : sanitizeIlikeNeedle(normalizeProductIdForCartFilter(value)),
+    )
+    .filter(Boolean);
+  if (!needles.length) return query;
+
+  const parts = [];
+  for (const needle of needles) {
+    const p = postgrestIlikeStarWrap(needle);
+    if (!p) continue;
+    parts.push(`raw_data->>cart_items.ilike.${p}`, `raw_data->>cartItems.ilike.${p}`);
+  }
+  if (!parts.length) return query;
+  return query.or(parts.join(","));
+}
+
+function applySelectedProductsFilter(query, { productIds, product_sku }) {
+  const ids = normalizeProductIdList(productIds);
+  const sku = parseProductFilterInput(product_sku);
+  if (!ids.length && !sku) return query;
+
+  const uuidIds = ids.filter((id) => UUID_LIKE.test(id));
+  const otherIds = ids.filter((id) => !UUID_LIKE.test(id));
+
+  if (
+    uuidIds.length >= 1 &&
+    uuidIds.length <= MAX_PRODUCT_UUID_CONTAINS_IDS &&
+    !otherIds.length &&
+    !sku
+  ) {
+    return applyProductUuidCartContainsAny(query, uuidIds);
+  }
+
+  return applyProductCartIlikeAny(query, {
+    product_ids: ids,
+    product_sku: sku,
+  });
 }
 
 function applyProductCartIlikeFilters(query, { product_id, product_sku }) {
@@ -3026,15 +3112,47 @@ function lineMatchesProductIdFilter(line, productIdFilter) {
   );
 }
 
+function resolveProductIdFilters(options = {}) {
+  if (Array.isArray(options.productIdFilters) && options.productIdFilters.length) {
+    return options.productIdFilters.map((id) => String(id).trim()).filter(Boolean);
+  }
+  if (options.productIdFilter) {
+    const id = String(options.productIdFilter).trim();
+    return id ? [id] : [];
+  }
+  return [];
+}
+
+function lineMatchesAnyProductId(line, productIdFilters) {
+  const filters = Array.isArray(productIdFilters) ? productIdFilters : [];
+  if (!filters.length) return true;
+  return filters.some((id) => lineMatchesProductIdFilter(line, id));
+}
+
+function rawHasAnySelectedProduct(raw, productIdFilters) {
+  const filters = Array.isArray(productIdFilters) ? productIdFilters : [];
+  if (!filters.length) return true;
+  return parseCartItemsArray(raw).some((line) =>
+    lineMatchesAnyProductId(line, filters),
+  );
+}
+
 /**
  * إجمالي القطع = مجموع quantity لأسطر cart_items (من السطر أو variant، وليس مخزون product).
- * @param {{ productIdFilter?: string }} options — عند فلتر منتج UUID نجمع أسطر ذلك المنتج فقط.
+ * @param {{ productIdFilter?: string, productIdFilters?: string[] }} options
  */
 function sumLineQuantitiesFromRaw(raw, options = {}) {
-  const { productIdFilter } = options;
+  const productIdFilters = resolveProductIdFilters(options);
   return parseCartItemsArray(raw).reduce((s, line) => {
-    if (!lineMatchesProductIdFilter(line, productIdFilter)) return s;
+    if (!lineMatchesAnyProductId(line, productIdFilters)) return s;
     return s + pickLineQuantity(line);
+  }, 0);
+}
+
+function sumMatchingLineRevenueFromRaw(raw, productIdFilters) {
+  return parseCartItemsArray(raw).reduce((s, line) => {
+    if (!lineMatchesAnyProductId(line, productIdFilters)) return s;
+    return s + pickLineRevenue(line);
   }, 0);
 }
 
@@ -3537,24 +3655,26 @@ async function getOrdersStatsTimeSeries({
     return q;
   }
 
-  const pidForStats = normalizeProductIdForCartFilter(product_id);
+  const productIdsForTrend = normalizeProductIdList(product_id);
   const skuForStats = parseProductFilterInput(product_sku);
-  const useProductUuidContainsTrend =
-    pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats;
+  const useSelectedProductsSqlFilter =
+    productIdsForTrend.length > 0 || Boolean(skuForStats);
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
     let nextQ = q;
     if (chunk && chunk.length) {
       nextQ = nextQ.in("order_id", chunk);
     }
-    if (useProductUuidContainsTrend) {
-      nextQ = applyProductUuidCartContainsOr(nextQ, pidForStats);
+    if (useSelectedProductsSqlFilter) {
+      nextQ = applySelectedProductsFilter(nextQ, {
+        productIds: productIdsForTrend,
+        product_sku,
+      });
     }
     return { nextQ, skip: false };
   }
 
-  const productIdForUnitSum =
-    pidForStats && UUID_LIKE.test(pidForStats) ? pidForStats : null;
+  const productIdFiltersForUnits = productIdsForTrend;
 
   const bucketMap = new Map();
   let rowCount = 0;
@@ -3582,7 +3702,7 @@ async function getOrdersStatsTimeSeries({
         q = q.lte("created_at", to.toISOString());
       }
       q = applyStatsRawContains(q, null, null);
-      if (!useProductUuidContainsTrend) {
+      if (!useSelectedProductsSqlFilter) {
         q = applyProductCartIlikeFilters(q, { product_id, product_sku });
       }
       if (listStatusFilterNorm != null) {
@@ -3628,6 +3748,13 @@ async function getOrdersStatsTimeSeries({
             ? row.raw_data
             : {};
 
+        if (
+          productIdFiltersForUnits.length &&
+          !rawHasAnySelectedProduct(raw, productIdFiltersForUnits)
+        ) {
+          continue;
+        }
+
         b.totalOrders += 1;
         if (isStatsShippedOrder(row)) {
           b.shippedOrders += 1;
@@ -3635,9 +3762,11 @@ async function getOrdersStatsTimeSeries({
         if (isStatsSuccessfulOrder(row, raw)) {
           b.successfulOrders += 1;
         }
-        b.total += pickOrderTotalCost(raw);
+        b.total += productIdFiltersForUnits.length
+          ? sumMatchingLineRevenueFromRaw(raw, productIdFiltersForUnits)
+          : pickOrderTotalCost(raw);
         b.totalProductUnits += sumLineQuantitiesFromRaw(raw, {
-          productIdFilter: productIdForUnitSum,
+          productIdFilters: productIdFiltersForUnits,
         });
       }
 
@@ -3730,13 +3859,15 @@ async function loadProductCatalogMeta(productIds) {
 
 /**
  * Sales chart per product: time buckets with orders / units / revenue.
- * Default (no product_id): all products in range. Optional product_id narrows to one product.
+ * Default (no product_id): all products in range.
+ * Optional product_id / product_ids narrows to one or more selected products.
  */
 async function getProductSalesChart({
   from,
   to,
   granularity = "day",
   product_id,
+  product_ids,
   useEgyptBuckets = false,
 }) {
   const gran =
@@ -3749,7 +3880,7 @@ async function getProductSalesChart({
     ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
     : (f, t, g) => listTrendBucketKeys(f, t, g);
 
-  const productIdFilter = normalizeProductIdForCartFilter(product_id);
+  const productIdFilters = normalizeProductIdList(product_id, product_ids);
   const bucketKeys = listBucketKeys(from, to, gran);
 
   const productMap = new Map();
@@ -3775,13 +3906,8 @@ async function getProductSalesChart({
     }
     q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
 
-    if (productIdFilter && UUID_LIKE.test(productIdFilter)) {
-      q = applyProductUuidCartContainsOr(q, productIdFilter);
-    } else if (productIdFilter) {
-      q = applyProductCartIlikeFilters(q, {
-        product_id: productIdFilter,
-        product_sku: null,
-      });
+    if (productIdFilters.length) {
+      q = applySelectedProductsFilter(q, { productIds: productIdFilters });
     }
 
     const remaining = MAX_PRODUCT_SALES_ROWS - rowCount;
@@ -3808,7 +3934,10 @@ async function getProductSalesChart({
       for (const line of parseCartItemsArray(raw)) {
         const pid = resolveLineProductId(line);
         if (!pid) continue;
-        if (productIdFilter && !lineMatchesProductIdFilter(line, productIdFilter)) {
+        if (
+          productIdFilters.length &&
+          !lineMatchesAnyProductId(line, productIdFilters)
+        ) {
           continue;
         }
 
@@ -4409,5 +4538,6 @@ module.exports = {
   getOrdersFilterLists,
   normalizeOrderStatusInput,
   normalizeCustomerStatusInput,
+  normalizeProductIdList,
   mergeOrderRawDataPatch,
 };
