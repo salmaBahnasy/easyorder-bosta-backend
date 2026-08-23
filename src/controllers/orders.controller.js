@@ -22,6 +22,7 @@ const {
   normalizeCustomerStatusInput,
   normalizeProductIdList,
   normalizeOrderPlatformInput,
+  normalizeUtmSourceFilter,
   ORDER_PLATFORMS,
 } = require("../services/webhookOrders.service");
 const { toPresentation, withCustomerConfirmation } = require("../services/easyorderPresentation.service");
@@ -468,6 +469,10 @@ function buildOrdersListFilters(req, pagination = {}) {
   const platform = platformRaw
     ? normalizeOrderPlatformInput(platformRaw)
     : undefined;
+  const utm_source =
+    normalizeUtmSourceFilter(
+      source.utm_source || source.utmSource || source.utm,
+    ) || undefined;
 
   if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
     const err = new Error(
@@ -529,6 +534,7 @@ function buildOrdersListFilters(req, pagination = {}) {
     phone,
     customer_name,
     platform,
+    utm_source,
     ignoreEmployeeLogDateRange,
   };
 
@@ -550,6 +556,7 @@ function buildOrdersListFilters(req, pagination = {}) {
     phone,
     customer_name,
     platform: platform || null,
+    utm_source: utm_source || null,
     page,
     limit,
   };
@@ -636,7 +643,7 @@ async function getOrders(req, res) {
       appliedFilters,
       filterLists: getOrdersFilterLists(),
       listOrdersQueryReference:
-        "GET /api/orders?... phone|mobile|customer_phone and customer_name|customerName|full_name|fullName|name (partial match on customer name in raw_data). employeeId|employee_id (UUID or email). employee_scope=all|any|all_time: with employee, from/to apply to activity logs only. Without employee_scope: from/to on order_status_logs.changed_at. Without employee: from/to on orders.created_at. product_id or easyorder_id (UUID): cart match via @> (no SKU required).",
+        "GET /api/orders?... utm_source|utmSource (exact match on raw_data, e.g. ig|fb|tiktok). phone|mobile|customer_phone and customer_name|customerName|full_name|fullName|name (partial match on customer name in raw_data). employeeId|employee_id (UUID or email). employee_scope=all|any|all_time: with employee, from/to apply to activity logs only. Without employee_scope: from/to on order_status_logs.changed_at. Without employee: from/to on orders.created_at. product_id or easyorder_id (UUID): cart match via @> (no SKU required).",
       ...result,
     });
   } catch (error) {
@@ -1294,6 +1301,10 @@ async function getOrdersStats(req, res) {
     const product_sku = optionalQueryParam(
       req.query.product_sku || req.query.productSku,
     );
+    const utm_source =
+      normalizeUtmSourceFilter(
+        req.query.utm_source || req.query.utmSource || req.query.utm,
+      ) || undefined;
 
     if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
       res.status(400).json({
@@ -1359,6 +1370,7 @@ async function getOrdersStats(req, res) {
         status,
         product_id,
         product_sku,
+        utm_source,
       },
       () =>
         getOrdersStatistics({
@@ -1372,6 +1384,7 @@ async function getOrdersStats(req, res) {
           status,
           product_id,
           product_sku,
+          utm_source,
         }),
     ).then((r) => r.value);
 
@@ -1401,6 +1414,7 @@ async function getOrdersStats(req, res) {
         product_id: product_id || null,
         easyorder_id: easyorder_id || null,
         product_sku: product_sku || null,
+        utm_source: utm_source || null,
       },
       stats: statsWithLegacyKeys,
       filterLists: getOrdersFilterLists(),
@@ -1446,6 +1460,10 @@ async function resolveOrdersTrendContext(req, res) {
   const product_sku = optionalQueryParam(
     req.query.product_sku || req.query.productSku,
   );
+  const utm_source =
+    normalizeUtmSourceFilter(
+      req.query.utm_source || req.query.utmSource || req.query.utm,
+    ) || undefined;
 
   const granularity = resolveTrendGranularityOrReply(req, res);
   if (!granularity) return null;
@@ -1520,6 +1538,7 @@ async function resolveOrdersTrendContext(req, res) {
       status,
       product_id: [...productIds].sort(),
       product_sku,
+      utm_source,
       useEgyptBuckets,
     },
     () =>
@@ -1535,6 +1554,7 @@ async function resolveOrdersTrendContext(req, res) {
         status,
         product_id: productIds,
         product_sku,
+        utm_source,
         useEgyptBuckets,
       }),
   ).then((r) => r.value);
@@ -1557,6 +1577,7 @@ async function resolveOrdersTrendContext(req, res) {
       product_ids: productIds,
       easyorder_id: easyorder_id || null,
       product_sku: product_sku || null,
+      utm_source: utm_source || null,
       period: granularity,
     },
   };

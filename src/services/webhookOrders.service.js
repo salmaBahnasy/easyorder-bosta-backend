@@ -46,6 +46,31 @@ const ORDER_PLATFORM_OPTIONS = [
 
 const ORDER_PLATFORMS = ORDER_PLATFORM_OPTIONS.map((o) => o.value);
 
+const UTM_SOURCE_OPTIONS = [
+  { value: "ig", labelAr: "إنستجرام" },
+  { value: "fb", labelAr: "فيسبوك" },
+  { value: "tiktok", labelAr: "تيك توك" },
+  { value: "th", labelAr: "TH" },
+];
+
+function normalizeUtmSourceFilter(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (
+    !raw ||
+    raw === "all" ||
+    raw === "any" ||
+    raw === "*" ||
+    raw === "none" ||
+    raw === "null" ||
+    raw === "undefined"
+  ) {
+    return "";
+  }
+  return raw;
+}
+
 function normalizeOrderPlatformInput(value) {
   const raw = String(value || "")
     .trim()
@@ -344,6 +369,11 @@ function getOrdersFilterLists() {
       key: "platform",
       labelAr: "المنصة",
       options: ORDER_PLATFORM_OPTIONS,
+    },
+    utmSource: {
+      key: "utm_source",
+      labelAr: "مصدر UTM",
+      options: UTM_SOURCE_OPTIONS,
     },
   };
 }
@@ -1868,11 +1898,24 @@ function applyPlatformFilter(query, platform) {
     .or("raw_data->>isManual.is.null,raw_data->>isManual.neq.true");
 }
 
+function applyRawDataUtmSourceContainsOr(query, utmSourceValue) {
+  const v = normalizeUtmSourceFilter(utmSourceValue);
+  if (!v) return query;
+  const e = escapePostgrestJsonStringForCsFragment(v);
+  return query.or(
+    [
+      `raw_data.cs.{"utm_source":"${e}"}`,
+      `raw_data.cs.{"utmSource":"${e}"}`,
+    ].join(","),
+  );
+}
+
 function applyRawDataMetaContains(query, {
   order_source,
   order_type,
   shipping_status,
   customer_status,
+  utm_source,
 }) {
   let q = query;
   if (order_source) {
@@ -1887,8 +1930,8 @@ function applyRawDataMetaContains(query, {
   if (customer_status) {
     q = applyRawDataCustomerStatusContainsOr(q, customer_status);
   }
-  if (!order_source && !order_type && !shipping_status && !customer_status) {
-    return query;
+  if (utm_source) {
+    q = applyRawDataUtmSourceContainsOr(q, utm_source);
   }
   return q;
 }
@@ -2065,6 +2108,7 @@ async function getWebhookOrders({
   phone,
   customer_name,
   platform,
+  utm_source,
   ignoreEmployeeLogDateRange = false,
 }) {
   const fromIndex = (page - 1) * limit;
@@ -2135,6 +2179,7 @@ async function getWebhookOrders({
       order_type,
       shipping_status,
       customer_status,
+      utm_source,
     });
     return applyPlatformFilter(q, platform);
   }
@@ -2865,6 +2910,7 @@ async function getOrdersStatistics({
   status: listStatusFilter,
   product_id,
   product_sku,
+  utm_source,
 }) {
   let orderIds = null;
   let employeeScope = null;
@@ -2918,6 +2964,9 @@ async function getOrdersStatistics({
     }
     if (shipping_status) {
       q = applyRawDataShippingStatusContainsOr(q, shipping_status);
+    }
+    if (utm_source) {
+      q = applyRawDataUtmSourceContainsOr(q, utm_source);
     }
     return q;
   }
@@ -3670,6 +3719,7 @@ async function getOrdersStatsTimeSeries({
   status: listStatusFilter,
   product_id,
   product_sku,
+  utm_source,
   useEgyptBuckets = false,
 }) {
   const gran =
@@ -3764,6 +3814,9 @@ async function getOrdersStatsTimeSeries({
     }
     if (effectiveShipping) {
       q = applyRawDataShippingStatusContainsOr(q, effectiveShipping);
+    }
+    if (utm_source) {
+      q = applyRawDataUtmSourceContainsOr(q, utm_source);
     }
     return q;
   }
@@ -4647,5 +4700,7 @@ module.exports = {
   normalizeOrderPlatformInput,
   ORDER_PLATFORMS,
   ORDER_PLATFORM_OPTIONS,
+  normalizeUtmSourceFilter,
+  UTM_SOURCE_OPTIONS,
   mergeOrderRawDataPatch,
 };
