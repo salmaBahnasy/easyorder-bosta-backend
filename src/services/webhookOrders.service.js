@@ -2840,6 +2840,14 @@ function applyOrderIdMembershipFilter(query, orderIds) {
   return query.or(orParts.join(","));
 }
 
+function emptyStatsByUtmSource() {
+  return Object.fromEntries(UTM_SOURCE_OPTIONS.map((o) => [o.value, 0]));
+}
+
+function pickRawUtmSource(raw) {
+  return normalizeUtmSourceFilter(raw?.utm_source ?? raw?.utmSource);
+}
+
 function buildEmptyStatsBreakdownResponse() {
   const byOrderSource = Object.fromEntries(ORDER_SOURCES.map((s) => [s, 0]));
   const byOrderType = Object.fromEntries(ORDER_TYPES.map((t) => [t, 0]));
@@ -2886,6 +2894,7 @@ function buildEmptyStatsBreakdownResponse() {
     byOrderSource,
     byOrderType,
     byShippingStatus,
+    byUtmSource: emptyStatsByUtmSource(),
   };
 }
 
@@ -2997,6 +3006,7 @@ async function getOrdersStatistics({
   const byShippingStatus = Object.fromEntries(
     SHIPPING_STATUSES.map((s) => [s, 0]),
   );
+  const byUtmSource = emptyStatsByUtmSource();
 
   let totalOrders = 0;
   let totalProductUnits = 0;
@@ -3084,6 +3094,11 @@ async function getOrdersStatistics({
           }
         }
 
+        const utm = pickRawUtmSource(raw);
+        if (utm) {
+          byUtmSource[utm] = (byUtmSource[utm] || 0) + 1;
+        }
+
         totalProductUnits += sumLineQuantitiesFromRaw(raw, {
           productIdFilter: productIdForUnitSum,
         });
@@ -3141,6 +3156,7 @@ async function getOrdersStatistics({
     byOrderSource,
     byOrderType,
     byShippingStatus,
+    byUtmSource,
     truncated,
     maxRowsCap: MAX_STATS_ROWS,
   };
