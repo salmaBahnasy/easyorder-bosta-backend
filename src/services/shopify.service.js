@@ -16,11 +16,17 @@ const SHOPIFY_ORDER_TOPICS = new Set([
 
 const SHOPIFY_TOPIC_ALIASES = {
   orders_create: "orders/create",
+  order_create: "orders/create",
+  "order/create": "orders/create",
   orders_updated: "orders/updated",
+  order_updated: "orders/updated",
+  "order/updated": "orders/updated",
   orders_edited: "orders/edited",
   orders_paid: "orders/paid",
   orders_cancelled: "orders/cancelled",
   orders_canceled: "orders/cancelled",
+  order_cancelled: "orders/cancelled",
+  "order/cancelled": "orders/cancelled",
   orders_fulfilled: "orders/fulfilled",
   orders_partially_fulfilled: "orders/partially_fulfilled",
 };
@@ -49,8 +55,21 @@ function getWebhookSecrets() {
     process.env.SHOPIFY_WEBHOOK_SECRET,
     process.env.SHOPIFY_WEBHOOK_SECRET_2,
   ]
-    .map((value) => String(value || "").trim())
+    .map((value) =>
+      String(value || "")
+        .trim()
+        .replace(/^['"]|['"]$/g, ""),
+    )
     .filter(Boolean);
+}
+
+function normalizeShopDomain(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/$/, "")
+    .replace(/\.myshopify\.com$/, "");
 }
 
 function getWebhookSecret() {
@@ -70,7 +89,7 @@ function normalizeShopifyTopic(topic) {
 }
 
 function getConfiguredShopDomain() {
-  return (process.env.SHOPIFY_SHOP_DOMAIN || "")
+  return String(process.env.SHOPIFY_SHOP_DOMAIN || "")
     .trim()
     .toLowerCase()
     .replace(/^https?:\/\//, "")
@@ -117,12 +136,20 @@ function verifyShopifyWebhook(req) {
     throw err;
   }
 
+  const hmacClean = hmacHeader.trim();
   const matched = secrets.some((secret) => {
-    const digest = crypto
+    const digestB64 = crypto
       .createHmac("sha256", secret)
       .update(rawBody)
       .digest("base64");
-    return timingSafeEqualString(digest, hmacHeader);
+    const digestHex = crypto
+      .createHmac("sha256", secret)
+      .update(rawBody)
+      .digest("hex");
+    return (
+      timingSafeEqualString(digestB64, hmacClean) ||
+      timingSafeEqualString(digestHex, hmacClean)
+    );
   });
 
   if (!matched) {
@@ -133,20 +160,24 @@ function verifyShopifyWebhook(req) {
   }
 
   const expectedShop = getConfiguredShopDomain();
-  if (expectedShop) {
-    const incomingShop = firstNonEmptyString(
-      req.get("x-shopify-shop-domain"),
-      req.get("X-Shopify-Shop-Domain"),
-    )
-      .toLowerCase()
-      .replace(/^https?:\/\//, "")
-      .replace(/\/$/, "");
-    if (incomingShop && incomingShop !== expectedShop) {
-      const err = new Error("Unexpected Shopify shop domain");
-      err.code = "INVALID_SHOPIFY_SHOP";
-      err.statusCode = 401;
-      throw err;
-    }
+  const incomingShop = firstNonEmptyString(
+    req.get("x-shopify-shop-domain"),
+    req.get("X-Shopify-Shop-Domain"),
+  );
+  if (
+    expectedShop &&
+    incomingShop &&
+    normalizeShopDomain(incomingShop) !== normalizeShopDomain(expectedShop)
+  ) {
+    console.warn(
+      JSON.stringify({
+        source: "shopify-webhook",
+        level: "warn",
+        message: "Shopify shop domain differs from SHOPIFY_SHOP_DOMAIN",
+        incomingShop,
+        expectedShop,
+      }),
+    );
   }
 
   return true;
@@ -159,8 +190,12 @@ function unwrapShopifyOrder(payload) {
   const candidates = [
     payload.order,
     payload.data?.order,
+    payload.data?.orderCreate?.order,
+    payload.data?.ordersCreate?.order,
     payload.data?.data?.order,
+    Array.isArray(payload.orders) ? payload.orders[0] : null,
     payload.payload,
+    payload.data,
     payload,
   ].filter((item) => item && typeof item === "object" && !Array.isArray(item));
 
@@ -571,6 +606,16 @@ function mapShopifyOrderToLocal(payload, options = {}) {
   };
 }
 
+function getShopifyWebhookConfigStatus() {
+  return {
+    secretsConfigured: getWebhookSecrets().length,
+    shopDomain: getConfiguredShopDomain() || null,
+    accessTokenConfigured: Boolean(
+      String(process.env.SHOPIFY_ACCESS_TOKEN || "").trim(),
+    ),
+  };
+}
+
 module.exports = {
   SHOPIFY_ID_PREFIX,
   verifyShopifyWebhook,
@@ -580,4 +625,5 @@ module.exports = {
   isOrderTopic,
   unwrapShopifyOrder,
   normalizeShopifyTopic,
+  getShopifyWebhookConfigStatus,
 };

@@ -1727,9 +1727,15 @@ async function addWebhookOrder(order, options = {}) {
     raw_data.easyOrdersStatus = easyOrdersStatusRaw;
   }
 
+  const incomingCreatedAt = (() => {
+    const raw = order?.created_at || order?.createdAt;
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  })();
   const createdAt = existingRow?.created_at
     ? new Date(existingRow.created_at)
-    : new Date();
+    : incomingCreatedAt || new Date();
 
   let orderReference = readOrderReferenceFromRow(existingRow);
   if (orderReference == null && shouldAssignOrderReference(createdAt)) {

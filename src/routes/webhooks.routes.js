@@ -10,6 +10,7 @@ const {
 } = require("../controllers/bostaFulfillment.controller");
 const {
   handleShopifyWebhook,
+  getShopifyWebhookStatus,
 } = require("../controllers/shopify.controller");
 const {
   toPresentation,
@@ -17,6 +18,7 @@ const {
 
 router.post("/bosta/order-status", handleBostaOrderStatusWebhook);
 
+router.get("/shopify/status", getShopifyWebhookStatus);
 router.post("/shopify", handleShopifyWebhook);
 router.post("/shopify/orders", handleShopifyWebhook);
 router.post("/shopify/orders/create", handleShopifyWebhook);

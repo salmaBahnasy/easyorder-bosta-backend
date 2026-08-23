@@ -7,7 +7,31 @@ const {
   isGdprTopic,
   isOrderTopic,
   normalizeShopifyTopic,
+  getShopifyWebhookConfigStatus,
 } = require("../services/shopify.service");
+
+const lastShopifyWebhook = {
+  at: null,
+  topic: null,
+  shop: null,
+  hmacOk: null,
+  savedOrderId: null,
+  message: null,
+  code: null,
+};
+
+function rememberShopifyWebhook(partial) {
+  Object.assign(lastShopifyWebhook, {
+    at: new Date().toISOString(),
+    topic: null,
+    shop: null,
+    hmacOk: null,
+    savedOrderId: null,
+    message: null,
+    code: null,
+    ...partial,
+  });
+}
 
 function readShopifyTopic(req) {
   return String(
@@ -31,6 +55,13 @@ async function handleShopifyWebhook(req, res) {
   try {
     verifyShopifyWebhook(req);
   } catch (error) {
+    rememberShopifyWebhook({
+      topic: incomingTopic || null,
+      shop: shop || null,
+      hmacOk: false,
+      message: error.message,
+      code: error.code || null,
+    });
     console.warn(
       JSON.stringify({
         source: "shopify-webhook",
@@ -78,6 +109,13 @@ async function handleShopifyWebhook(req, res) {
   try {
     const mapped = mapShopifyOrderToLocal(req.body, { topic });
     if (!mapped) {
+      rememberShopifyWebhook({
+        topic,
+        shop: shop || null,
+        hmacOk: true,
+        message: "Shopify payload could not be mapped",
+        code: "UNMAPPED_PAYLOAD",
+      });
       console.warn(
         JSON.stringify({
           source: "shopify-webhook",
@@ -85,6 +123,10 @@ async function handleShopifyWebhook(req, res) {
           message: "Shopify payload could not be mapped",
           topic,
           shop: shop || null,
+          bodyKeys:
+            req.body && typeof req.body === "object"
+              ? Object.keys(req.body)
+              : [],
         }),
       );
       res.status(200).json({
@@ -96,6 +138,13 @@ async function handleShopifyWebhook(req, res) {
     }
 
     const savedOrder = await addWebhookOrder(mapped, { fromWebhook: true });
+    rememberShopifyWebhook({
+      topic,
+      shop: shop || null,
+      hmacOk: true,
+      savedOrderId: savedOrder?.sourceOrderId || mapped.id,
+      message: "Shopify order saved",
+    });
     console.log(
       JSON.stringify({
         source: "shopify-webhook",
@@ -113,6 +162,13 @@ async function handleShopifyWebhook(req, res) {
       data: savedOrder,
     });
   } catch (error) {
+    rememberShopifyWebhook({
+      topic,
+      shop: shop || null,
+      hmacOk: true,
+      message: error.message,
+      code: "SAVE_FAILED",
+    });
     res.status(500).json({
       success: false,
       message: "Failed to save Shopify webhook order",
@@ -122,6 +178,20 @@ async function handleShopifyWebhook(req, res) {
   }
 }
 
+function getShopifyWebhookStatus(req, res) {
+  res.json({
+    success: true,
+    ...getShopifyWebhookConfigStatus(),
+    lastWebhook: lastShopifyWebhook.at ? lastShopifyWebhook : null,
+    webhookPaths: [
+      "/webhooks/shopify",
+      "/webhooks/shopify/orders",
+      "/webhooks/shopify/orders/create",
+    ],
+  });
+}
+
 module.exports = {
   handleShopifyWebhook,
+  getShopifyWebhookStatus,
 };
