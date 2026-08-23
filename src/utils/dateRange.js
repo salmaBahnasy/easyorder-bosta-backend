@@ -158,9 +158,53 @@ function addEgyptCalendarDays(year, month, day, deltaDays) {
 }
 
 /**
- * Trend bucket key in Egypt local calendar (day / week-start Monday / month).
+ * 7-day weeks that start on the selected range `from` (Egypt calendar).
+ * Aug 1–23 → 2026-08-01, 2026-08-08, 2026-08-15, 2026-08-22
  */
-function getEgyptTrendBucketKey(date, granularity) {
+function getEgyptRangeWeekBucketKey(date, rangeFrom) {
+  const origin = rangeFrom ? new Date(rangeFrom) : new Date(date);
+  if (Number.isNaN(origin.getTime())) return null;
+
+  const start = getZonedParts(origin);
+  const current = getZonedParts(date);
+  const startNoon = egyptLocalToUtc(
+    start.year,
+    start.month,
+    start.day,
+    12,
+    0,
+    0,
+    0,
+  );
+  const currentNoon = egyptLocalToUtc(
+    current.year,
+    current.month,
+    current.day,
+    12,
+    0,
+    0,
+    0,
+  );
+  let diffDays = Math.round(
+    (currentNoon.getTime() - startNoon.getTime()) / 86400000,
+  );
+  if (diffDays < 0) diffDays = 0;
+  const weekIndex = Math.floor(diffDays / 7);
+  const bucket = addEgyptCalendarDays(
+    start.year,
+    start.month,
+    start.day,
+    weekIndex * 7,
+  );
+  return formatYmd(bucket.year, bucket.month, bucket.day);
+}
+
+/**
+ * Trend bucket key in Egypt local calendar.
+ * Week keys are 7-day blocks from `rangeFrom` (the selected from),
+ * not the preceding Monday — so Aug 1 never becomes July 27.
+ */
+function getEgyptTrendBucketKey(date, granularity, rangeFrom) {
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return null;
 
@@ -170,11 +214,7 @@ function getEgyptTrendBucketKey(date, granularity) {
   }
 
   if (granularity === "week") {
-    const p = getZonedParts(d);
-    const wd = getEgyptWeekdayIndex(d);
-    const diff = wd === 0 ? -6 : 1 - wd;
-    const monday = addEgyptCalendarDays(p.year, p.month, p.day, diff);
-    return formatYmd(monday.year, monday.month, monday.day);
+    return getEgyptRangeWeekBucketKey(d, rangeFrom || d);
   }
 
   return getEgyptCalendarDateKey(d);
@@ -184,42 +224,49 @@ function getEgyptTrendBucketKey(date, granularity) {
  * All bucket keys between from/to (UTC instants) on Egypt calendar.
  */
 function listEgyptTrendBucketKeys(from, to, granularity = "day") {
-  const endKey =
-    granularity === "month"
-      ? getEgyptTrendBucketKey(to, "month")
-      : getEgyptCalendarDateKey(to);
-
-  if (granularity === "day") {
+  if (granularity === "month") {
     const keys = [];
-    let { year, month, day } = getZonedParts(from);
+    let { year, month } = getZonedParts(from);
+    const end = getZonedParts(to);
     for (;;) {
-      const key = formatYmd(year, month, day);
-      keys.push(key);
-      if (key >= endKey) break;
-      ({ year, month, day } = addEgyptCalendarDays(year, month, day, 1));
+      keys.push(`${year}-${String(month).padStart(2, "0")}`);
+      if (year > end.year || (year === end.year && month >= end.month)) break;
+      month += 1;
+      if (month > 12) {
+        month = 1;
+        year += 1;
+      }
     }
     return keys;
   }
 
-  const keys = [];
-  const seen = new Set();
-  let { year, month, day } = getZonedParts(from);
-  const endMs = to.getTime();
-
-  for (;;) {
-    const utc = egyptLocalToUtc(year, month, day, 12, 0, 0, 0);
-    if (utc.getTime() > endMs) break;
-
-    const k = getEgyptTrendBucketKey(utc, granularity);
-    if (k && !seen.has(k)) {
-      seen.add(k);
-      keys.push(k);
+  if (granularity === "week") {
+    const first = getEgyptCalendarDateKey(from);
+    const last = getEgyptRangeWeekBucketKey(to, from);
+    if (!first || !last) return [];
+    const [fy, fm, fd] = first.split("-").map(Number);
+    const keys = [];
+    let year = fy;
+    let month = fm;
+    let day = fd;
+    for (;;) {
+      const key = formatYmd(year, month, day);
+      keys.push(key);
+      if (key >= last) break;
+      ({ year, month, day } = addEgyptCalendarDays(year, month, day, 7));
     }
-
-    if (getEgyptCalendarDateKey(utc) >= getEgyptCalendarDateKey(to)) break;
-    ({ year, month, day } = addEgyptCalendarDays(year, month, day, 1));
+    return keys;
   }
 
+  const endKey = getEgyptCalendarDateKey(to);
+  const keys = [];
+  let { year, month, day } = getZonedParts(from);
+  for (;;) {
+    const key = formatYmd(year, month, day);
+    keys.push(key);
+    if (key >= endKey) break;
+    ({ year, month, day } = addEgyptCalendarDays(year, month, day, 1));
+  }
   return keys;
 }
 
@@ -420,6 +467,7 @@ module.exports = {
   resolveSingleDayFromQueryValue,
   getEgyptCalendarDateKey,
   getEgyptTrendBucketKey,
+  getEgyptRangeWeekBucketKey,
   listEgyptTrendBucketKeys,
   egyptLocalToUtc,
   isEasyOrderApiRequest,

@@ -107,11 +107,17 @@ function buildDayChartPoint(date, storedRow, ordersMap, shippedMap, deliveredMap
   return chartPointFromLiveDay(date, ordersMap, shippedMap, deliveredMap);
 }
 
-function aggregateDailyChartPoints(dailyPoints, bucketKey, granularity) {
+function aggregateDailyChartPoints(
+  dailyPoints,
+  bucketKey,
+  granularity,
+  rangeFrom,
+) {
   const inBucket = dailyPoints.filter((p) => {
     const bucket = getEgyptTrendBucketKey(
       new Date(`${p.date}T12:00:00.000Z`),
       granularity,
+      rangeFrom,
     );
     return bucket === bucketKey;
   });
@@ -338,7 +344,7 @@ async function getOrderCostChartFromStorage({
     gran === "day"
       ? dailyPoints
       : bucketKeys.map((bucketKey) =>
-          aggregateDailyChartPoints(dailyPoints, bucketKey, gran),
+          aggregateDailyChartPoints(dailyPoints, bucketKey, gran, from),
         );
 
   const summary = summarizeChartPoints(points);

@@ -338,9 +338,10 @@ function mergeOrdersFilterSource(req) {
       ? req.body
       : {};
   const method = String(req.method || "GET").toUpperCase();
-  // GET export/list: query string is authoritative (axios may attach a stale body).
+  // GET: query only. Merging body let axios leftover product_ids/from/to
+  // re-apply on trend and made the dashboard scan huge JSONB filters.
   if (method === "GET" || method === "HEAD") {
-    return { ...body, ...query };
+    return { ...query };
   }
   return { ...query, ...body };
 }
@@ -1517,7 +1518,7 @@ async function resolveOrdersTrendContext(req, res) {
       order_type,
       shipping_status,
       status,
-      product_id: productIds,
+      product_id: [...productIds].sort(),
       product_sku,
       useEgyptBuckets,
     },

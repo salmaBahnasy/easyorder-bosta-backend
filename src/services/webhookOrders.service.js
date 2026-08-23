@@ -1888,7 +1888,15 @@ function applyRawDataMetaContains(query, {
 }
 
 const MAX_PRODUCT_FILTER_IDS = 50;
-const MAX_PRODUCT_UUID_CONTAINS_IDS = 8;
+const PRODUCT_ID_SENTINELS = new Set([
+  "all",
+  "any",
+  "*",
+  "everyone",
+  "none",
+  "null",
+  "undefined",
+]);
 
 function normalizeProductIdList(...values) {
   const ids = [];
@@ -1906,6 +1914,7 @@ function normalizeProductIdList(...values) {
         const id = normalizeProductIdForCartFilter(part);
         if (!id) return;
         const key = id.toLowerCase();
+        if (PRODUCT_ID_SENTINELS.has(key)) return;
         if (seen.has(key)) return;
         seen.add(key);
         ids.push(id);
@@ -1991,13 +2000,10 @@ function applySelectedProductsFilter(query, { productIds, product_sku }) {
   const uuidIds = ids.filter((id) => UUID_LIKE.test(id));
   const otherIds = ids.filter((id) => !UUID_LIKE.test(id));
 
-  if (
-    uuidIds.length >= 1 &&
-    uuidIds.length <= MAX_PRODUCT_UUID_CONTAINS_IDS &&
-    !otherIds.length &&
-    !sku
-  ) {
-    return applyProductUuidCartContainsAny(query, uuidIds);
+  // One UUID: keep the precise contains filter. Multiple IDs: cheap ilike
+  // then refine in memory — 20 contains-clauses per product times out PostgREST.
+  if (uuidIds.length === 1 && !otherIds.length && !sku) {
+    return applyProductUuidCartContainsOr(query, uuidIds[0]);
   }
 
   return applyProductCartIlikeAny(query, {
@@ -3506,6 +3512,36 @@ async function getOrdersAnalyticsReport({
 }
 
 const MAX_TREND_ROWS = 50000;
+const TREND_SELECT_FULL = "order_id,created_at,status,raw_data";
+const TREND_SELECT_SLIM = [
+  "order_id",
+  "created_at",
+  "status",
+  "cart_items:raw_data->cart_items",
+  "cartItems:raw_data->cartItems",
+  "total_cost:raw_data->total_cost",
+  "cost:raw_data->cost",
+  "shipping_status:raw_data->shipping_status",
+  "shippingStatus:raw_data->shippingStatus",
+].join(",");
+
+function slimTrendRawFromRow(row) {
+  if (
+    row?.raw_data &&
+    typeof row.raw_data === "object" &&
+    !Array.isArray(row.raw_data)
+  ) {
+    return row.raw_data;
+  }
+  return {
+    cart_items: row?.cart_items,
+    cartItems: row?.cartItems,
+    total_cost: row?.total_cost,
+    cost: row?.cost,
+    shipping_status: row?.shipping_status,
+    shippingStatus: row?.shippingStatus,
+  };
+}
 
 function emptyTrendBucket() {
   return {
@@ -3543,8 +3579,8 @@ function formatLocalCalendarDateKey(d) {
   return `${y}-${m}-${day}`;
 }
 
-/** مفتاح التجميع للرسم البياني: يوم / أسبوع (بداية الاثنين محليًا) / شهر */
-function bucketKeyFromDate(date, granularity) {
+/** مفتاح التجميع: يوم / أسبوع (7 أيام من from) / شهر */
+function bucketKeyFromDate(date, granularity, rangeFrom) {
   const d = new Date(date);
   if (Number.isNaN(d.getTime())) return null;
 
@@ -3555,12 +3591,17 @@ function bucketKeyFromDate(date, granularity) {
   }
 
   if (granularity === "week") {
-    const day = d.getDay();
-    const diff = day === 0 ? -6 : 1 - day;
-    const monday = new Date(d);
-    monday.setDate(d.getDate() + diff);
-    monday.setHours(0, 0, 0, 0);
-    return formatLocalCalendarDateKey(monday);
+    const origin = rangeFrom ? new Date(rangeFrom) : new Date(d);
+    if (Number.isNaN(origin.getTime())) return null;
+    origin.setHours(0, 0, 0, 0);
+    const cur = new Date(d);
+    cur.setHours(0, 0, 0, 0);
+    let diffDays = Math.round((cur.getTime() - origin.getTime()) / 86400000);
+    if (diffDays < 0) diffDays = 0;
+    const weekIndex = Math.floor(diffDays / 7);
+    const bucket = new Date(origin);
+    bucket.setDate(origin.getDate() + weekIndex * 7);
+    return formatLocalCalendarDateKey(bucket);
   }
 
   return formatLocalCalendarDateKey(d);
@@ -3583,8 +3624,8 @@ function listTrendBucketKeys(from, to, granularity) {
 
   if (granularity === "week") {
     while (cur <= end) {
-      const k = bucketKeyFromDate(cur, "week");
-      if (k && !keys.includes(k)) keys.push(k);
+      const k = formatLocalCalendarDateKey(cur);
+      keys.push(k);
       cur.setDate(cur.getDate() + 7);
     }
     return keys;
@@ -3629,8 +3670,8 @@ async function getOrdersStatsTimeSeries({
     granularity === "week" || granularity === "month" ? granularity : "day";
 
   const bucketKeyForDate = useEgyptBuckets
-    ? (date, g) => getEgyptTrendBucketKey(date, g)
-    : (date, g) => bucketKeyFromDate(date, g);
+    ? (date, g) => getEgyptTrendBucketKey(date, g, from)
+    : (date, g) => bucketKeyFromDate(date, g, from);
   const listBucketKeys = useEgyptBuckets
     ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
     : (f, t, g) => listTrendBucketKeys(f, t, g);
@@ -3723,19 +3764,16 @@ async function getOrdersStatsTimeSeries({
 
   const productIdsForTrend = normalizeProductIdList(product_id);
   const skuForStats = parseProductFilterInput(product_sku);
-  const useSelectedProductsSqlFilter =
-    productIdsForTrend.length > 0 || Boolean(skuForStats);
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
     let nextQ = q;
     if (chunk && chunk.length) {
       nextQ = nextQ.in("order_id", chunk);
     }
-    if (useSelectedProductsSqlFilter) {
-      nextQ = applySelectedProductsFilter(nextQ, {
-        productIds: productIdsForTrend,
-        product_sku,
-      });
+    // Product IDs are refined in memory. JSONB contains/ilike OR on
+    // raw_data is what made /stats/trend hang after multi-product.
+    if (skuForStats && !productIdsForTrend.length) {
+      nextQ = applyProductCartIlikeFilters(nextQ, { product_sku });
     }
     return { nextQ, skip: false };
   }
@@ -3745,6 +3783,7 @@ async function getOrdersStatsTimeSeries({
   const bucketMap = new Map();
   let rowCount = 0;
   let truncated = false;
+  let trendSelect = employeeScope ? TREND_SELECT_FULL : TREND_SELECT_SLIM;
 
   for (const chunk of chunks) {
     let offset = 0;
@@ -3754,9 +3793,7 @@ async function getOrdersStatsTimeSeries({
         break;
       }
 
-      let q = supabase
-        .from(ORDERS_TABLE)
-        .select("order_id,created_at,raw_data,status");
+      let q = supabase.from(ORDERS_TABLE).select(trendSelect);
       const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
       if (scoped.skip) break;
       q = scoped.nextQ;
@@ -3767,10 +3804,8 @@ async function getOrdersStatsTimeSeries({
       if (to && filterOrdersByCreatedAtInRange) {
         q = q.lte("created_at", to.toISOString());
       }
+      q = q.order("created_at", { ascending: true });
       q = applyStatsRawContains(q, null, null);
-      if (!useSelectedProductsSqlFilter) {
-        q = applyProductCartIlikeFilters(q, { product_id, product_sku });
-      }
       if (listStatusFilterNorm != null) {
         const statuses =
           listStatusFilterNorm === "pending"
@@ -3786,7 +3821,13 @@ async function getOrdersStatsTimeSeries({
       q = q.range(offset, offset + pageSize - 1);
 
       const { data, error } = await q;
-      if (error) throw new Error(error.message);
+      if (error) {
+        if (!employeeScope && trendSelect === TREND_SELECT_SLIM) {
+          trendSelect = TREND_SELECT_FULL;
+          continue;
+        }
+        throw new Error(error.message);
+      }
       if (!data || data.length === 0) break;
 
       for (const row of data) {
@@ -3807,12 +3848,7 @@ async function getOrdersStatsTimeSeries({
           });
         }
         const b = bucketMap.get(key);
-        const raw =
-          row.raw_data &&
-          typeof row.raw_data === "object" &&
-          !Array.isArray(row.raw_data)
-            ? row.raw_data
-            : {};
+        const raw = slimTrendRawFromRow(row);
 
         if (
           productIdFiltersForUnits.length &&
@@ -3940,8 +3976,8 @@ async function getProductSalesChart({
     granularity === "week" || granularity === "month" ? granularity : "day";
 
   const bucketKeyForDate = useEgyptBuckets
-    ? (date, g) => getEgyptTrendBucketKey(date, g)
-    : (date, g) => bucketKeyFromDate(date, g);
+    ? (date, g) => getEgyptTrendBucketKey(date, g, from)
+    : (date, g) => bucketKeyFromDate(date, g, from);
   const listBucketKeys = useEgyptBuckets
     ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
     : (f, t, g) => listTrendBucketKeys(f, t, g);
@@ -3953,6 +3989,7 @@ async function getProductSalesChart({
   let rowCount = 0;
   let truncated = false;
   let offset = 0;
+  let productSalesSelect = TREND_SELECT_SLIM;
 
   for (;;) {
     if (rowCount >= MAX_PRODUCT_SALES_ROWS) {
@@ -3960,9 +3997,7 @@ async function getProductSalesChart({
       break;
     }
 
-    let q = supabase
-      .from(ORDERS_TABLE)
-      .select("order_id,created_at,raw_data,status");
+    let q = supabase.from(ORDERS_TABLE).select(productSalesSelect);
 
     if (from) {
       q = q.gte("created_at", from.toISOString());
@@ -3970,18 +4005,21 @@ async function getProductSalesChart({
     if (to) {
       q = q.lte("created_at", to.toISOString());
     }
+    q = q.order("created_at", { ascending: true });
     q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
-
-    if (productIdFilters.length) {
-      q = applySelectedProductsFilter(q, { productIds: productIdFilters });
-    }
 
     const remaining = MAX_PRODUCT_SALES_ROWS - rowCount;
     const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
     q = q.range(offset, offset + pageSize - 1);
 
     const { data, error } = await q;
-    if (error) throw new Error(error.message);
+    if (error) {
+      if (productSalesSelect === TREND_SELECT_SLIM) {
+        productSalesSelect = TREND_SELECT_FULL;
+        continue;
+      }
+      throw new Error(error.message);
+    }
     if (!data || data.length === 0) break;
 
     for (const row of data) {
@@ -3989,12 +4027,7 @@ async function getProductSalesChart({
       const bucketDate = bucketKeyForDate(row.created_at, gran);
       if (!bucketDate) continue;
 
-      const raw =
-        row.raw_data &&
-        typeof row.raw_data === "object" &&
-        !Array.isArray(row.raw_data)
-          ? row.raw_data
-          : {};
+      const raw = slimTrendRawFromRow(row);
 
       const seenProductsInOrder = new Set();
       for (const line of parseCartItemsArray(raw)) {
@@ -4327,8 +4360,8 @@ async function computeOrderCostBucketMapsForRange({
     granularity === "week" || granularity === "month" ? granularity : "day";
 
   const bucketKeyForDate = useEgyptBuckets
-    ? (date, g) => getEgyptTrendBucketKey(date, g)
-    : (date, g) => bucketKeyFromDate(date, g);
+    ? (date, g) => getEgyptTrendBucketKey(date, g, from)
+    : (date, g) => bucketKeyFromDate(date, g, from);
 
   const useCreatedAtColumn = dateBasis === "created";
   const bucketKeys = [];
