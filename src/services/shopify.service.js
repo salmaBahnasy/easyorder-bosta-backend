@@ -9,9 +9,21 @@ const SHOPIFY_ORDER_TOPICS = new Set([
   "orders/edited",
   "orders/paid",
   "orders/cancelled",
+  "orders/canceled",
   "orders/fulfilled",
   "orders/partially_fulfilled",
 ]);
+
+const SHOPIFY_TOPIC_ALIASES = {
+  orders_create: "orders/create",
+  orders_updated: "orders/updated",
+  orders_edited: "orders/edited",
+  orders_paid: "orders/paid",
+  orders_cancelled: "orders/cancelled",
+  orders_canceled: "orders/cancelled",
+  orders_fulfilled: "orders/fulfilled",
+  orders_partially_fulfilled: "orders/partially_fulfilled",
+};
 const SHOPIFY_GDPR_TOPICS = new Set([
   "customers/data_request",
   "customers/redact",
@@ -32,8 +44,29 @@ function toNumber(value, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function getWebhookSecrets() {
+  return [
+    process.env.SHOPIFY_WEBHOOK_SECRET,
+    process.env.SHOPIFY_WEBHOOK_SECRET_2,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
 function getWebhookSecret() {
-  return (process.env.SHOPIFY_WEBHOOK_SECRET || "").trim();
+  return getWebhookSecrets()[0] || "";
+}
+
+function normalizeShopifyTopic(topic) {
+  const raw = String(topic || "")
+    .trim()
+    .toLowerCase();
+  if (!raw) return "";
+  if (SHOPIFY_ORDER_TOPICS.has(raw)) return raw;
+  if (SHOPIFY_TOPIC_ALIASES[raw]) return SHOPIFY_TOPIC_ALIASES[raw];
+  const slashed = raw.replace(/_/g, "/");
+  if (SHOPIFY_ORDER_TOPICS.has(slashed)) return slashed;
+  return raw;
 }
 
 function getConfiguredShopDomain() {
@@ -57,8 +90,8 @@ function timingSafeEqualString(a, b) {
  * Shopify HMAC-SHA256 of the raw JSON body (base64), header X-Shopify-Hmac-Sha256.
  */
 function verifyShopifyWebhook(req) {
-  const secret = getWebhookSecret();
-  if (!secret) {
+  const secrets = getWebhookSecrets();
+  if (!secrets.length) {
     const err = new Error("SHOPIFY_WEBHOOK_SECRET is not configured");
     err.code = "MISSING_SHOPIFY_SECRET";
     err.statusCode = 500;
@@ -84,12 +117,15 @@ function verifyShopifyWebhook(req) {
     throw err;
   }
 
-  const digest = crypto
-    .createHmac("sha256", secret)
-    .update(rawBody)
-    .digest("base64");
+  const matched = secrets.some((secret) => {
+    const digest = crypto
+      .createHmac("sha256", secret)
+      .update(rawBody)
+      .digest("base64");
+    return timingSafeEqualString(digest, hmacHeader);
+  });
 
-  if (!timingSafeEqualString(digest, hmacHeader)) {
+  if (!matched) {
     const err = new Error("Invalid Shopify HMAC");
     err.code = "INVALID_SHOPIFY_HMAC";
     err.statusCode = 401;
@@ -120,11 +156,29 @@ function unwrapShopifyOrder(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return null;
   }
-  if (payload.order && typeof payload.order === "object") {
-    return payload.order;
-  }
-  if (payload.id != null || payload.order_number != null || payload.line_items) {
-    return payload;
+  const candidates = [
+    payload.order,
+    payload.data?.order,
+    payload.data?.data?.order,
+    payload.payload,
+    payload,
+  ].filter((item) => item && typeof item === "object" && !Array.isArray(item));
+
+  for (const obj of candidates) {
+    if (
+      obj.id != null ||
+      obj.admin_graphql_api_id != null ||
+      obj.adminGraphqlApiId != null ||
+      obj.legacyResourceId != null ||
+      obj.legacy_resource_id != null ||
+      obj.order_number != null ||
+      obj.orderNumber != null ||
+      obj.name != null ||
+      obj.line_items != null ||
+      obj.lineItems != null
+    ) {
+      return obj;
+    }
   }
   return null;
 }
@@ -139,9 +193,13 @@ function stripShopifyGid(value) {
 
 function resolveShopifyNumericId(order) {
   return firstNonEmptyString(
+    stripShopifyGid(order?.legacyResourceId),
+    stripShopifyGid(order?.legacy_resource_id),
     stripShopifyGid(order?.id),
     stripShopifyGid(order?.admin_graphql_api_id),
+    stripShopifyGid(order?.adminGraphqlApiId),
     order?.order_number,
+    order?.orderNumber,
   );
 }
 
@@ -174,12 +232,35 @@ function joinName(first, last) {
     .join(" ");
 }
 
+function pickShopifyMoney(...values) {
+  for (const value of values) {
+    if (value == null) continue;
+    if (typeof value === "object") {
+      const nested = pickShopifyMoney(
+        value.amount,
+        value.shop_money?.amount,
+        value.shopMoney?.amount,
+      );
+      if (nested !== "") return toNumber(nested, NaN);
+      continue;
+    }
+    const n = toNumber(value, NaN);
+    if (Number.isFinite(n)) return n;
+  }
+  return NaN;
+}
+
 function mapPaymentMethodFromShopify(order) {
   const names = [
     order?.gateway,
+    order?.paymentGateway,
     order?.processing_method,
+    order?.processingMethod,
     ...(Array.isArray(order?.payment_gateway_names)
       ? order.payment_gateway_names
+      : []),
+    ...(Array.isArray(order?.paymentGatewayNames)
+      ? order.paymentGatewayNames
       : []),
   ]
     .filter(Boolean)
@@ -203,11 +284,18 @@ function mapPaymentMethodFromShopify(order) {
 function mapCustomerStatusFromShopify(order, topic) {
   const cancelled =
     Boolean(order?.cancelled_at) ||
+    Boolean(order?.cancelledAt) ||
     Boolean(order?.cancel_reason) ||
-    String(topic || "").toLowerCase() === "orders/cancelled";
+    Boolean(order?.cancelReason) ||
+    normalizeShopifyTopic(topic) === "orders/cancelled";
   if (cancelled) return "canceled";
 
-  const financial = String(order?.financial_status || "")
+  const financial = String(
+    order?.financial_status ||
+      order?.displayFinancialStatus ||
+      order?.display_financial_status ||
+      "",
+  )
     .trim()
     .toLowerCase();
   const paymentMethod = mapPaymentMethodFromShopify(order);
@@ -222,7 +310,12 @@ function mapCustomerStatusFromShopify(order, topic) {
 }
 
 function mapShippingStatusFromShopify(order) {
-  const fulfilment = String(order?.fulfillment_status || "")
+  const fulfilment = String(
+    order?.fulfillment_status ||
+      order?.displayFulfillmentStatus ||
+      order?.display_fulfillment_status ||
+      "",
+  )
     .trim()
     .toLowerCase();
   if (fulfilment === "fulfilled") return "delivered";
@@ -232,33 +325,47 @@ function mapShippingStatusFromShopify(order) {
 function mapErpStatusFromShopify(order, topic) {
   const cancelled =
     Boolean(order?.cancelled_at) ||
+    Boolean(order?.cancelledAt) ||
     Boolean(order?.cancel_reason) ||
-    String(topic || "").toLowerCase() === "orders/cancelled";
+    Boolean(order?.cancelReason) ||
+    normalizeShopifyTopic(topic) === "orders/cancelled";
   return cancelled ? "canceled" : "new";
 }
 
 function mapAddress(order) {
   const shipping =
-    order?.shipping_address && typeof order.shipping_address === "object"
+    (order?.shipping_address && typeof order.shipping_address === "object"
       ? order.shipping_address
-      : {};
+      : null) ||
+    (order?.shippingAddress && typeof order.shippingAddress === "object"
+      ? order.shippingAddress
+      : {}) ||
+    {};
   const billing =
-    order?.billing_address && typeof order.billing_address === "object"
+    (order?.billing_address && typeof order.billing_address === "object"
       ? order.billing_address
-      : {};
+      : null) ||
+    (order?.billingAddress && typeof order.billingAddress === "object"
+      ? order.billingAddress
+      : {}) ||
+    {};
   const customer =
     order?.customer && typeof order.customer === "object" ? order.customer : {};
   const defaultAddr =
-    customer.default_address && typeof customer.default_address === "object"
+    (customer.default_address && typeof customer.default_address === "object"
       ? customer.default_address
-      : {};
+      : null) ||
+    (customer.defaultAddress && typeof customer.defaultAddress === "object"
+      ? customer.defaultAddress
+      : {}) ||
+    {};
 
   const fullName = firstNonEmptyString(
     shipping.name,
-    joinName(shipping.first_name, shipping.last_name),
+    joinName(shipping.first_name || shipping.firstName, shipping.last_name || shipping.lastName),
     billing.name,
-    joinName(billing.first_name, billing.last_name),
-    joinName(customer.first_name, customer.last_name),
+    joinName(billing.first_name || billing.firstName, billing.last_name || billing.lastName),
+    joinName(customer.first_name || customer.firstName, customer.last_name || customer.lastName),
     order?.email,
   );
 
@@ -293,8 +400,20 @@ function mapAddress(order) {
   return { fullName, phone, address, government, city };
 }
 
+function extractLineItems(order) {
+  if (Array.isArray(order?.line_items)) return order.line_items;
+  if (Array.isArray(order?.lineItems)) return order.lineItems;
+  if (Array.isArray(order?.lineItems?.nodes)) return order.lineItems.nodes;
+  if (Array.isArray(order?.lineItems?.edges)) {
+    return order.lineItems.edges
+      .map((edge) => edge?.node)
+      .filter((node) => node && typeof node === "object");
+  }
+  return [];
+}
+
 function mapLineItems(order) {
-  const lines = Array.isArray(order?.line_items) ? order.line_items : [];
+  const lines = extractLineItems(order);
   return lines.map((line) => {
     const name = firstNonEmptyString(
       line.title,
@@ -337,22 +456,28 @@ function mapLineItems(order) {
 }
 
 function resolveShippingCost(order) {
-  const fromSet = toNumber(
-    order?.total_shipping_price_set?.shop_money?.amount,
-    NaN,
+  const fromSet = pickShopifyMoney(
+    order?.total_shipping_price_set,
+    order?.totalShippingPriceSet,
+    order?.shipping_cost,
+    order?.shippingCost,
   );
   if (Number.isFinite(fromSet)) return fromSet;
 
-  const lines = Array.isArray(order?.shipping_lines) ? order.shipping_lines : [];
-  return lines.reduce((sum, line) => sum + toNumber(line.price, 0), 0);
+  const lines = Array.isArray(order?.shipping_lines)
+    ? order.shipping_lines
+    : Array.isArray(order?.shippingLines)
+      ? order.shippingLines
+      : [];
+  return lines.reduce((sum, line) => sum + toNumber(line.price ?? line.originalPriceSet?.shopMoney?.amount, 0), 0);
 }
 
 function isGdprTopic(topic) {
-  return SHOPIFY_GDPR_TOPICS.has(String(topic || "").trim().toLowerCase());
+  return SHOPIFY_GDPR_TOPICS.has(normalizeShopifyTopic(topic));
 }
 
 function isOrderTopic(topic) {
-  const t = String(topic || "").trim().toLowerCase();
+  const t = normalizeShopifyTopic(topic);
   if (!t) return true;
   return SHOPIFY_ORDER_TOPICS.has(t);
 }
@@ -368,34 +493,57 @@ function mapShopifyOrderToLocal(payload, options = {}) {
   const localId = buildLocalOrderId(order);
   if (!localId) return null;
 
-  const topic = options.topic || "";
+  const topic = normalizeShopifyTopic(options.topic || "");
   const address = mapAddress(order);
   const cartItems = mapLineItems(order);
   const shippingCost = resolveShippingCost(order);
-  const subtotal = toNumber(order.subtotal_price, toNumber(order.total_line_items_price));
-  const total = toNumber(order.total_price, subtotal + shippingCost);
+  const subtotal = pickShopifyMoney(
+    order.subtotal_price,
+    order.subtotalPrice,
+    order.current_subtotal_price,
+    order.currentSubtotalPrice,
+    order.total_line_items_price,
+    order.totalLineItemsPrice,
+    order.subtotalPriceSet,
+    order.currentSubtotalPriceSet,
+  );
+  const total = pickShopifyMoney(
+    order.total_price,
+    order.totalPrice,
+    order.current_total_price,
+    order.currentTotalPrice,
+    order.totalPriceSet,
+    order.currentTotalPriceSet,
+  );
   const customerStatus = mapCustomerStatusFromShopify(order, topic);
   const shippingStatus = mapShippingStatusFromShopify(order);
   const erpStatus = mapErpStatusFromShopify(order, topic);
-  const phone2 = firstNonEmptyString(
-    order?.billing_address?.phone &&
-      order.billing_address.phone !== address.phone
-      ? order.billing_address.phone
-      : "",
+  const billingPhone = firstNonEmptyString(
+    order?.billing_address?.phone,
+    order?.billingAddress?.phone,
   );
+  const phone2 =
+    billingPhone && billingPhone !== address.phone ? billingPhone : "";
 
   return {
     id: localId,
-    short_id: firstNonEmptyString(order.name, order.order_number, localId),
+    short_id: firstNonEmptyString(
+      order.name,
+      order.order_number,
+      order.orderNumber,
+      localId,
+    ),
     full_name: address.fullName,
     phone: address.phone,
     phone2: phone2 || undefined,
     address: address.address,
     government: address.government,
     city: address.city,
-    cost: subtotal,
+    cost: Number.isFinite(subtotal) ? subtotal : 0,
     shipping_cost: shippingCost,
-    total_cost: total,
+    total_cost: Number.isFinite(total)
+      ? total
+      : (Number.isFinite(subtotal) ? subtotal : 0) + shippingCost,
     payment_method: mapPaymentMethodFromShopify(order),
     cart_items: cartItems,
     status: erpStatus,
@@ -405,18 +553,21 @@ function mapShopifyOrderToLocal(payload, options = {}) {
     shippingStatus,
     order_source: "store",
     order_type: "new",
-    created_at: order.created_at || undefined,
-    updated_at: order.updated_at || undefined,
+    created_at: order.created_at || order.createdAt || undefined,
+    updated_at: order.updated_at || order.updatedAt || undefined,
     platform: "shopify",
     order_platform: "shopify",
     shopify_order_id: resolveShopifyNumericId(order),
-    shopify_order_number: order.order_number ?? null,
+    shopify_order_number: order.order_number ?? order.orderNumber ?? null,
     shopify_name: order.name ?? null,
-    shopify_financial_status: order.financial_status ?? null,
-    shopify_fulfillment_status: order.fulfillment_status ?? null,
-    shopify_gateway: order.gateway ?? null,
+    shopify_financial_status:
+      order.financial_status ?? order.displayFinancialStatus ?? null,
+    shopify_fulfillment_status:
+      order.fulfillment_status ?? order.displayFulfillmentStatus ?? null,
+    shopify_gateway: order.gateway ?? order.paymentGateway ?? null,
     shopify_topic: topic || null,
-    shopify_currency: order.currency || order.presentment_currency || null,
+    shopify_currency:
+      order.currency || order.presentment_currency || order.currencyCode || null,
   };
 }
 
@@ -428,4 +579,5 @@ module.exports = {
   isGdprTopic,
   isOrderTopic,
   unwrapShopifyOrder,
+  normalizeShopifyTopic,
 };

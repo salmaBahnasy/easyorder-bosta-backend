@@ -21,6 +21,8 @@ const {
   normalizeOrderStatusInput,
   normalizeCustomerStatusInput,
   normalizeProductIdList,
+  normalizeOrderPlatformInput,
+  ORDER_PLATFORMS,
 } = require("../services/webhookOrders.service");
 const { toPresentation, withCustomerConfirmation } = require("../services/easyorderPresentation.service");
 const { isShopifyOrder } = require("../services/shopify.service");
@@ -52,6 +54,7 @@ const {
   TREND_GRANULARITY_OPTIONS,
   TREND_GRANULARITY_VALUES,
   normalizeTrendGranularity,
+  resolveSelectedTrendDateRange,
 } = require("../utils/dateRange");
 const {
   saveOrderCostDailyEntry,
@@ -223,26 +226,9 @@ function resolveOrdersStatsDateRange(req) {
 }
 
 function resolveOrdersTrendDateRange(req) {
-  if (isEasyOrderApiRequest(req)) {
-    return resolveEasyOrderDateRange(req);
-  }
-
-  const defaultRange = getDefaultDateRange();
-  const from = req.query.from ? new Date(req.query.from) : defaultRange.from;
-  const to = req.query.to ? new Date(req.query.to) : defaultRange.to;
-
-  if (Number.isNaN(from.getTime())) {
-    const err = new Error("Invalid from date");
-    err.code = "INVALID_FROM";
-    throw err;
-  }
-  if (Number.isNaN(to.getTime())) {
-    const err = new Error("Invalid to date");
-    err.code = "INVALID_TO";
-    throw err;
-  }
-
-  return { from, to };
+  return resolveSelectedTrendDateRange(mergeOrdersFilterSource(req), {
+    useEgypt: isEasyOrderApiRequest(req),
+  });
 }
 
 function resolveOrderCostsDateRange(req) {
@@ -475,6 +461,12 @@ function buildOrdersListFilters(req, pagination = {}) {
     employee_scope === "all" ||
     employee_scope === "any" ||
     employee_scope === "all_time";
+  const platformRaw = optionalSentinelFilter(
+    source.platform || source.order_platform || source.orderPlatform,
+  );
+  const platform = platformRaw
+    ? normalizeOrderPlatformInput(platformRaw)
+    : undefined;
 
   if (status && !ALLOWED_ORDER_STATUSES.includes(status)) {
     const err = new Error(
@@ -514,6 +506,12 @@ function buildOrdersListFilters(req, pagination = {}) {
     throw err;
   }
 
+  if (platformRaw && !platform) {
+    const err = new Error("Invalid platform filter");
+    err.code = "INVALID_PLATFORM";
+    throw err;
+  }
+
   const filters = {
     page,
     limit,
@@ -529,6 +527,7 @@ function buildOrdersListFilters(req, pagination = {}) {
     product_sku,
     phone,
     customer_name,
+    platform,
     ignoreEmployeeLogDateRange,
   };
 
@@ -549,6 +548,7 @@ function buildOrdersListFilters(req, pagination = {}) {
     product_sku,
     phone,
     customer_name,
+    platform: platform || null,
     page,
     limit,
   };
@@ -608,6 +608,14 @@ async function getOrders(req, res) {
           success: false,
           message: error.message,
           allowedCustomerStatuses: CUSTOMER_STATUSES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_PLATFORM") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedPlatforms: ORDER_PLATFORMS,
         });
         return;
       }
@@ -699,6 +707,14 @@ async function exportOrders(req, res) {
           success: false,
           message: error.message,
           allowedCustomerStatuses: CUSTOMER_STATUSES,
+        });
+        return;
+      }
+      if (error.code === "INVALID_PLATFORM") {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          allowedPlatforms: ORDER_PLATFORMS,
         });
         return;
       }
@@ -1477,7 +1493,11 @@ async function resolveOrdersTrendContext(req, res) {
   try {
     ({ from, to } = resolveOrdersTrendDateRange(req));
   } catch (error) {
-    if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+    if (
+      error.code === "INVALID_FROM" ||
+      error.code === "INVALID_TO" ||
+      error.code === "INVALID_DATE_RANGE"
+    ) {
       res.status(400).json({ success: false, message: error.message });
       return null;
     }
@@ -1733,7 +1753,11 @@ async function getProductSalesChartHandler(req, res) {
     try {
       ({ from, to } = resolveOrdersTrendDateRange(req));
     } catch (error) {
-      if (error.code === "INVALID_FROM" || error.code === "INVALID_TO") {
+      if (
+        error.code === "INVALID_FROM" ||
+        error.code === "INVALID_TO" ||
+        error.code === "INVALID_DATE_RANGE"
+      ) {
         res.status(400).json({ success: false, message: error.message });
         return;
       }

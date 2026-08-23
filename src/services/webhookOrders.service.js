@@ -37,6 +37,35 @@ const ORDER_SOURCE_OPTIONS = [
 
 const ORDER_SOURCES = ORDER_SOURCE_OPTIONS.map((o) => o.value);
 
+/** منصة الطلب في قائمة الأوردرز: شوبيفاي / إيزي أوردر / يدوي */
+const ORDER_PLATFORM_OPTIONS = [
+  { value: "shopify", labelAr: "شوبيفاي" },
+  { value: "easyorder", labelAr: "إيزي أوردر" },
+  { value: "manual", labelAr: "يدوي" },
+];
+
+const ORDER_PLATFORMS = ORDER_PLATFORM_OPTIONS.map((o) => o.value);
+
+function normalizeOrderPlatformInput(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (!raw) return "";
+  const aliases = {
+    shopify: "shopify",
+    easyorder: "easyorder",
+    easyorders: "easyorder",
+    "easy-order": "easyorder",
+    "easy-orders": "easyorder",
+    manual: "manual",
+    يدوي: "manual",
+    شوبيفاي: "shopify",
+    "إيزي أوردر": "easyorder",
+    "ايزي اوردر": "easyorder",
+  };
+  return aliases[raw] || "";
+}
+
 /** نوع الطلب */
 const ORDER_TYPE_OPTIONS = [
   { value: "new", labelAr: "جديد" },
@@ -310,6 +339,11 @@ function getOrdersFilterLists() {
       key: "customer_status",
       labelAr: "حالة العميل",
       options: CUSTOMER_STATUS_OPTIONS,
+    },
+    platform: {
+      key: "platform",
+      labelAr: "المنصة",
+      options: ORDER_PLATFORM_OPTIONS,
     },
   };
 }
@@ -1798,6 +1832,36 @@ function applyRawDataCustomerStatusContainsOr(query, customerStatusValue) {
   );
 }
 
+function applyPlatformFilter(query, platform) {
+  const value = normalizeOrderPlatformInput(platform);
+  if (!value) return query;
+
+  if (value === "shopify") {
+    return query.or(
+      [
+        "order_id.ilike.shopify-*",
+        'raw_data.cs.{"platform":"shopify"}',
+        'raw_data.cs.{"order_platform":"shopify"}',
+        'raw_data.cs.{"orderPlatform":"shopify"}',
+      ].join(","),
+    );
+  }
+
+  if (value === "manual") {
+    return query.or(
+      'raw_data.cs.{"is_manual":true},raw_data.cs.{"isManual":true}',
+    );
+  }
+
+  return query
+    .not("order_id", "ilike", "shopify-*")
+    .or(
+      "raw_data->>platform.is.null,raw_data->>platform.eq.easyorder,raw_data->>platform.eq.easyorders",
+    )
+    .or("raw_data->>is_manual.is.null,raw_data->>is_manual.neq.true")
+    .or("raw_data->>isManual.is.null,raw_data->>isManual.neq.true");
+}
+
 function applyRawDataMetaContains(query, {
   order_source,
   order_type,
@@ -1988,6 +2052,7 @@ async function getWebhookOrders({
   product_sku,
   phone,
   customer_name,
+  platform,
   ignoreEmployeeLogDateRange = false,
 }) {
   const fromIndex = (page - 1) * limit;
@@ -2053,12 +2118,13 @@ async function getWebhookOrders({
     if (status) {
       q = q.eq("status", status);
     }
-    return applyRawDataMetaContains(q, {
+    q = applyRawDataMetaContains(q, {
       order_source,
       order_type,
       shipping_status,
       customer_status,
     });
+    return applyPlatformFilter(q, platform);
   }
 
   const useChunkedEmployeeMembership =
@@ -4539,5 +4605,8 @@ module.exports = {
   normalizeOrderStatusInput,
   normalizeCustomerStatusInput,
   normalizeProductIdList,
+  normalizeOrderPlatformInput,
+  ORDER_PLATFORMS,
+  ORDER_PLATFORM_OPTIONS,
   mergeOrderRawDataPatch,
 };

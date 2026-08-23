@@ -257,6 +257,105 @@ function normalizeTrendGranularity(value) {
   return TREND_GRANULARITY_ALIASES[raw] || null;
 }
 
+function pickFirstQueryValue(source, keys) {
+  if (!source || typeof source !== "object") return "";
+  for (const key of keys) {
+    if (source[key] == null) continue;
+    const raw = source[key];
+    const s = String(Array.isArray(raw) ? raw[0] : raw).trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+function parseTrendDateBound(raw, which) {
+  const s = String(Array.isArray(raw) ? raw[0] : raw).trim();
+  if (!s) return null;
+
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+    const { from, to } = getEgyptDayRange(s);
+    return which === "to" ? to : from;
+  }
+
+  const midnightUtc = s.match(
+    /^(\d{4}-\d{2}-\d{2})(?:[T ]00:00:00(?:\.0+)?(?:Z)?)?$/i,
+  );
+  if (midnightUtc) {
+    const { from, to } = getEgyptDayRange(midnightUtc[1]);
+    return which === "to" ? to : from;
+  }
+
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) {
+    const err = new Error(
+      which === "to" ? "Invalid to date" : "Invalid from date",
+    );
+    err.code = which === "to" ? "INVALID_TO" : "INVALID_FROM";
+    throw err;
+  }
+  return d;
+}
+
+function getEgyptMonthStartForDate(date) {
+  const p = getZonedParts(date);
+  return egyptLocalToUtc(p.year, p.month, 1, 0, 0, 0, 0);
+}
+
+/**
+ * Trend window = the caller's selected from/to.
+ * day/week/month only buckets that window; they never replace it.
+ */
+function resolveSelectedTrendDateRange(source, options = {}) {
+  const useEgypt = options.useEgypt !== false;
+  const now = options.now || new Date();
+
+  const fromRaw = pickFirstQueryValue(source, [
+    "from",
+    "date_from",
+    "dateFrom",
+    "start_date",
+    "startDate",
+    "start",
+  ]);
+  const toRaw = pickFirstQueryValue(source, [
+    "to",
+    "date_to",
+    "dateTo",
+    "end_date",
+    "endDate",
+    "end",
+  ]);
+
+  let from = fromRaw ? parseTrendDateBound(fromRaw, "from") : null;
+  let to = toRaw ? parseTrendDateBound(toRaw, "to") : null;
+
+  if (!from && !to) {
+    if (useEgypt) {
+      return { ...getEgyptMonthToDateRange(now), usedDefault: true };
+    }
+    const localFrom = new Date(now.getFullYear(), now.getMonth(), 1);
+    localFrom.setHours(0, 0, 0, 0);
+    const localTo = new Date(now);
+    localTo.setHours(23, 59, 59, 999);
+    return { from: localFrom, to: localTo, usedDefault: true };
+  }
+
+  if (from && !to) to = now;
+  if (!from && to) {
+    from = useEgypt
+      ? getEgyptMonthStartForDate(to)
+      : new Date(to.getFullYear(), to.getMonth(), 1);
+  }
+
+  if (from.getTime() > to.getTime()) {
+    const err = new Error("from must be before to");
+    err.code = "INVALID_DATE_RANGE";
+    throw err;
+  }
+
+  return { from, to, usedDefault: false };
+}
+
 function isEasyOrderApiRequest(req) {
   const original = String(req.originalUrl || req.url || "");
   const base = String(req.baseUrl || "");
@@ -328,4 +427,5 @@ module.exports = {
   TREND_GRANULARITY_OPTIONS,
   TREND_GRANULARITY_VALUES,
   normalizeTrendGranularity,
+  resolveSelectedTrendDateRange,
 };

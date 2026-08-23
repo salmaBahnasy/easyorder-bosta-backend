@@ -6,6 +6,7 @@ const {
   mapShopifyOrderToLocal,
   isGdprTopic,
   isOrderTopic,
+  normalizeShopifyTopic,
 } = require("../services/shopify.service");
 
 function readShopifyTopic(req) {
@@ -22,9 +23,25 @@ function readShopifyTopic(req) {
  * EasyOrder webhook handler is unchanged.
  */
 async function handleShopifyWebhook(req, res) {
+  const incomingTopic = readShopifyTopic(req);
+  const shop = String(
+    req.get("x-shopify-shop-domain") || req.get("X-Shopify-Shop-Domain") || "",
+  ).trim();
+
   try {
     verifyShopifyWebhook(req);
   } catch (error) {
+    console.warn(
+      JSON.stringify({
+        source: "shopify-webhook",
+        level: "warn",
+        message: error.message,
+        code: error.code,
+        topic: incomingTopic || null,
+        shop: shop || null,
+        hmacOk: false,
+      }),
+    );
     const status = error.statusCode || 401;
     res.status(status).json({
       success: false,
@@ -34,7 +51,15 @@ async function handleShopifyWebhook(req, res) {
     return;
   }
 
-  const topic = readShopifyTopic(req);
+  const topic = normalizeShopifyTopic(incomingTopic);
+  console.log(
+    JSON.stringify({
+      source: "shopify-webhook",
+      topic: topic || incomingTopic || null,
+      shop: shop || null,
+      hmacOk: true,
+    }),
+  );
 
   if (isGdprTopic(topic)) {
     res.status(200).json({ success: true, message: "GDPR webhook acknowledged" });
@@ -53,6 +78,15 @@ async function handleShopifyWebhook(req, res) {
   try {
     const mapped = mapShopifyOrderToLocal(req.body, { topic });
     if (!mapped) {
+      console.warn(
+        JSON.stringify({
+          source: "shopify-webhook",
+          level: "warn",
+          message: "Shopify payload could not be mapped",
+          topic,
+          shop: shop || null,
+        }),
+      );
       res.status(200).json({
         success: true,
         message: "No Shopify order payload to save",
@@ -62,6 +96,15 @@ async function handleShopifyWebhook(req, res) {
     }
 
     const savedOrder = await addWebhookOrder(mapped, { fromWebhook: true });
+    console.log(
+      JSON.stringify({
+        source: "shopify-webhook",
+        message: "Shopify order saved",
+        topic,
+        shop: shop || null,
+        orderId: savedOrder?.sourceOrderId || mapped.id,
+      }),
+    );
 
     res.status(200).json({
       success: true,
