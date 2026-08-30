@@ -1198,11 +1198,13 @@ async function refreshCustomerStatus(req, res) {
       toPresentation(result.order) || result.order,
       { easyOrdersConfirm: result.easyOrdersConfirm },
     );
+    const source = result.source || result.easyOrdersConfirm?.source || "easyorders";
+    const sourceLabel = source === "shopify" ? "Shopify" : "EasyOrders";
 
     res.json({
       success: true,
       message: result.changed
-        ? "تم تحديث حالة العميل من EasyOrders"
+        ? `تم تحديث حالة العميل من ${sourceLabel}`
         : "حالة العميل محدّثة (بدون تغيير)",
       data: {
         orderId,
@@ -1211,6 +1213,7 @@ async function refreshCustomerStatus(req, res) {
         customer_status: result.customerStatus,
         easyordersStatus: result.easyOrdersConfirm?.status ?? null,
         changed: result.changed,
+        source,
         easyOrdersConfirm: result.easyOrdersConfirm,
         order: presented,
       },
@@ -1225,10 +1228,7 @@ async function refreshCustomerStatus(req, res) {
       return;
     }
 
-    if (
-      error.code === "MANUAL_ORDER_NO_REFRESH" ||
-      error.code === "SHOPIFY_ORDER_NO_REFRESH"
-    ) {
+    if (error.code === "MANUAL_ORDER_NO_REFRESH") {
       res.status(error.statusCode || 400).json({
         success: false,
         message: error.message,

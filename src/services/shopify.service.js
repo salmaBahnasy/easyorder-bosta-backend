@@ -900,6 +900,144 @@ function mapShopifyOrderToLocal(payload, options = {}) {
   };
 }
 
+async function fetchShopifyOrderByNumericId(numericId) {
+  const id = stripShopifyGid(numericId);
+  if (!id || !/^\d+$/.test(id)) {
+    const err = new Error("Invalid Shopify order id");
+    err.code = "INVALID_SHOPIFY_ORDER_ID";
+    throw err;
+  }
+
+  const { shop, token } = assertShopifyAdminConfig();
+  const response = await axios.get(
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/orders/${id}.json`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": token,
+        Accept: "application/json",
+      },
+      timeout: 30000,
+      validateStatus: () => true,
+    },
+  );
+
+  if (response.status >= 400) {
+    throw shopifyAdminError(response);
+  }
+
+  return response.data?.order || null;
+}
+
+function normalizeLocalCustomerStatus(value) {
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (raw === "cancelled") return "canceled";
+  if (raw === "confirmed" || raw === "canceled" || raw === "pending" || raw === "failed") {
+    return raw;
+  }
+  return "pending";
+}
+
+/**
+ * UI refresh for Shopify rows: pull live order from Admin API and persist customerStatus.
+ * If Admin token is missing, returns the stored status instead of 400.
+ */
+async function refreshCustomerStatusFromShopify(localOrder) {
+  const { mergeOrderRawDataPatch } = require("./webhookOrders.service");
+  const previousCustomerStatus = normalizeLocalCustomerStatus(
+    localOrder?.customer_status ?? localOrder?.customerStatus,
+  );
+  const sourceOrderId = String(
+    localOrder?.sourceOrderId || localOrder?.id || localOrder?.order_id || "",
+  ).trim();
+  const numericId = String(
+    localOrder?.shopify_order_id ||
+      resolveShopifyNumericId({
+        id: sourceOrderId,
+        legacyResourceId: localOrder?.shopify_order_id,
+      }) ||
+      "",
+  )
+    .replace(/^shopify-/i, "")
+    .replace(/^gid:\/\/shopify\/Order\//i, "")
+    .trim();
+
+  let remote = null;
+  try {
+    remote = await fetchShopifyOrderByNumericId(numericId);
+  } catch (error) {
+    if (
+      error.code === "MISSING_SHOPIFY_TOKEN" ||
+      error.code === "MISSING_SHOPIFY_SHOP"
+    ) {
+      return {
+        order: localOrder,
+        easyOrdersConfirm: {
+          id: sourceOrderId,
+          shortId: localOrder?.short_id || localOrder?.shortId || null,
+          status: previousCustomerStatus,
+          customerStatus: previousCustomerStatus,
+          source: "shopify",
+        },
+        previousCustomerStatus,
+        customerStatus: previousCustomerStatus,
+        changed: false,
+        source: "shopify",
+      };
+    }
+    throw error;
+  }
+
+  if (!remote) {
+    const err = new Error("Shopify order was not found");
+    err.code = "ORDER_NOT_FOUND";
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const mapped = mapShopifyOrderToLocal(remote, { topic: "orders/updated" });
+  const customerStatus = normalizeLocalCustomerStatus(
+    mapped?.customer_status || mapped?.customerStatus,
+  );
+
+  let order = {
+    ...localOrder,
+    customer_status: customerStatus,
+    customerStatus,
+    shopify_financial_status: mapped.shopify_financial_status,
+    shopify_fulfillment_status: mapped.shopify_fulfillment_status,
+  };
+
+  if (sourceOrderId) {
+    order = await mergeOrderRawDataPatch(sourceOrderId, {
+      customer_status: customerStatus,
+      customerStatus,
+      confirmation_source: "shopify",
+      confirmation_status:
+        customerStatus === "canceled" ? "cancelled" : customerStatus,
+      shopify_financial_status: mapped.shopify_financial_status,
+      shopify_fulfillment_status: mapped.shopify_fulfillment_status,
+      shopify_customer_synced_at: new Date().toISOString(),
+    });
+  }
+
+  return {
+    order,
+    easyOrdersConfirm: {
+      id: sourceOrderId,
+      shortId: mapped.short_id || localOrder?.short_id || null,
+      status: customerStatus,
+      customerStatus,
+      source: "shopify",
+    },
+    previousCustomerStatus,
+    customerStatus,
+    changed: previousCustomerStatus !== customerStatus,
+    source: "shopify",
+  };
+}
+
 function getShopifyWebhookConfigStatus() {
   return {
     secretsConfigured: getWebhookSecrets().length,
@@ -925,4 +1063,6 @@ module.exports = {
   getShopifyWebhookConfigStatus,
   getConfiguredShopDomain,
   getShopifyAccessToken,
+  fetchShopifyOrderByNumericId,
+  refreshCustomerStatusFromShopify,
 };

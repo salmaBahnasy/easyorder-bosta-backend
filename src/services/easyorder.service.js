@@ -1,5 +1,8 @@
 const axios = require("axios");
-const { isShopifyOrder } = require("./shopify.service");
+const {
+  isShopifyOrder,
+  refreshCustomerStatusFromShopify,
+} = require("./shopify.service");
 
 const EASYORDER_API_BASE =
   process.env.EASYORDER_API_BASE_URL ||
@@ -217,12 +220,7 @@ async function refreshCustomerStatusFromEasyOrders(orderId) {
   }
 
   if (isShopifyOrder(localOrder)) {
-    const err = new Error(
-      "Shopify orders cannot be refreshed from EasyOrders",
-    );
-    err.code = "SHOPIFY_ORDER_NO_REFRESH";
-    err.statusCode = 400;
-    throw err;
+    return refreshCustomerStatusFromShopify(localOrder);
   }
 
   const previousStatus =
