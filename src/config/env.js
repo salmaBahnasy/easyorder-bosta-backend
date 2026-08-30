@@ -21,5 +21,6 @@ module.exports = {
   shopify: {
     webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET,
     shopDomain: process.env.SHOPIFY_SHOP_DOMAIN,
+    accessToken: process.env.SHOPIFY_ACCESS_TOKEN,
   },
 };

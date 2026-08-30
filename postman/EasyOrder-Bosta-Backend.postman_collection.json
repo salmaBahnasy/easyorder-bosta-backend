@@ -356,6 +356,14 @@
             "header": [],
             "url": "{{baseUrl}}/api/products/sync"
           }
+        },
+        {
+          "name": "Sync Shopify products",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/api/products/sync-shopify"
+          }
         }
       ]
     },

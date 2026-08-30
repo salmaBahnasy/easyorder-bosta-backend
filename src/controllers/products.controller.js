@@ -1,24 +1,132 @@
 const easyorderService = require("../services/easyorder.service");
 const {
   syncProductsFromEasyOrder,
+  syncProductsFromShopify,
   getProductsFromDb,
+  getProductFromDbById,
 } = require("../services/products.service");
 
-async function syncProducts(req, res) {
-  try {
-    const payload = await easyorderService.getProductsFromEasyOrder();
-    const result = await syncProductsFromEasyOrder(payload);
+function errorPayload(error) {
+  return error.response?.data || error.message;
+}
 
+function isShopifyNotConfigured(error) {
+  return (
+    error?.code === "MISSING_SHOPIFY_TOKEN" ||
+    error?.code === "MISSING_SHOPIFY_SHOP"
+  );
+}
+
+function isShopifyProductId(productId) {
+  return String(productId || "")
+    .trim()
+    .toLowerCase()
+    .startsWith("shopify-");
+}
+
+async function runEasyOrderSync() {
+  const payload = await easyorderService.getProductsFromEasyOrder();
+  return syncProductsFromEasyOrder(payload);
+}
+
+async function runShopifySync() {
+  return syncProductsFromShopify();
+}
+
+/**
+ * POST /api/products/sync
+ * Syncs EasyOrders + Shopify (when configured) into the same `products` table.
+ * Query/body `source=easyorder|shopify|all` (default: all).
+ */
+async function syncProducts(req, res) {
+  const source = String(req.query.source || req.body?.source || "all")
+    .trim()
+    .toLowerCase();
+  const wantEasyorder = source === "all" || source === "easyorder" || source === "easyorders";
+  const wantShopify = source === "all" || source === "shopify";
+
+  if (!wantEasyorder && !wantShopify) {
+    res.status(400).json({
+      success: false,
+      message: "source must be all, easyorder, or shopify",
+    });
+    return;
+  }
+
+  const data = {};
+
+  if (wantEasyorder) {
+    try {
+      data.easyorder = await runEasyOrderSync();
+    } catch (error) {
+      data.easyorder = { error: errorPayload(error) };
+    }
+  }
+
+  if (wantShopify) {
+    try {
+      data.shopify = await runShopifySync();
+    } catch (error) {
+      if (isShopifyNotConfigured(error) && source === "all") {
+        data.shopify = { skipped: true, reason: error.message };
+      } else {
+        data.shopify = { error: errorPayload(error) };
+      }
+    }
+  }
+
+  const easyorderOk = Boolean(data.easyorder && !data.easyorder.error);
+  const shopifyOk = Boolean(
+    data.shopify && !data.shopify.error && !data.shopify.skipped,
+  );
+  const anyOk = easyorderOk || shopifyOk;
+
+  if (!anyOk) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to sync products",
+      data,
+    });
+    return;
+  }
+
+  const payload = {
+    easyorder: data.easyorder || null,
+    shopify: data.shopify || null,
+  };
+  if (easyorderOk) {
+    Object.assign(payload, data.easyorder);
+  } else if (shopifyOk) {
+    Object.assign(payload, data.shopify);
+  }
+
+  res.json({
+    success: true,
+    message: "Products synced to database",
+    data: payload,
+  });
+}
+
+/**
+ * POST /api/products/sync-shopify
+ */
+async function syncShopifyProducts(req, res) {
+  try {
+    const result = await runShopifySync();
     res.json({
       success: true,
-      message: "Products synced from EasyOrders to database",
+      message: "Products synced from Shopify to database",
       data: result,
     });
   } catch (error) {
-    res.status(error.response?.status || 500).json({
+    const status =
+      error.status ||
+      error.response?.status ||
+      (isShopifyNotConfigured(error) ? 400 : 500);
+    res.status(status).json({
       success: false,
-      message: "Failed to sync products from EasyOrders",
-      error: error.response?.data || error.message,
+      message: "Failed to sync products from Shopify",
+      error: errorPayload(error),
     });
   }
 }
@@ -28,8 +136,9 @@ async function getProducts(req, res) {
     const page = Number(req.query.page) || 1;
     const limit = Number(req.query.limit) || 50;
     const search = req.query.search;
+    const platform = req.query.platform;
 
-    const result = await getProductsFromDb({ page, limit, search });
+    const result = await getProductsFromDb({ page, limit, search, platform });
 
     res.json({
       success: true,
@@ -47,7 +156,7 @@ async function getProducts(req, res) {
 /**
  * GET /api/products/:productId
  * GET /api/easyorder/products/:productId
- * Proxies EasyOrders: GET /external-apps/products/:product_id
+ * Local catalog first (EasyOrder + Shopify), then EasyOrders API.
  */
 async function getEasyOrderProductById(req, res) {
   try {
@@ -65,11 +174,32 @@ async function getEasyOrderProductById(req, res) {
       return;
     }
 
-    const product = await easyorderService.getProductById(productId);
+    const id = String(productId).trim();
+    const local = await getProductFromDbById(id);
+    if (local) {
+      res.json({
+        success: true,
+        product_id: id,
+        source: local.platform || "local",
+        data: local,
+      });
+      return;
+    }
+
+    if (isShopifyProductId(id)) {
+      res.status(404).json({
+        success: false,
+        message: "Shopify product not found. Sync products first.",
+      });
+      return;
+    }
+
+    const product = await easyorderService.getProductById(id);
 
     res.json({
       success: true,
-      product_id: String(productId).trim(),
+      product_id: id,
+      source: "easyorder",
       data: product,
     });
   } catch (error) {
@@ -87,6 +217,7 @@ async function getEasyOrderProductById(req, res) {
 
 module.exports = {
   syncProducts,
+  syncShopifyProducts,
   getProducts,
   getEasyOrderProductById,
 };

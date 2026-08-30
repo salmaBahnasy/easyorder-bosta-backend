@@ -1557,6 +1557,7 @@ async function resolveOrdersTrendContext(req, res) {
         utm_source,
         useEgyptBuckets,
       }),
+    180_000,
   ).then((r) => r.value);
 
   return {

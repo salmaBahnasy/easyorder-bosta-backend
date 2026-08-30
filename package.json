@@ -12,7 +12,8 @@
     "backfill-order-references": "node scripts/backfill-order-references.js --yes",
     "backfill-customer-status": "node scripts/backfill-customer-status-from-easyorders.js --yes",
     "test:shopify-webhook": "node scripts/test-shopify-webhook.js",
-    "sync:shopify-orders": "node scripts/sync-shopify-orders.js"
+    "sync:shopify-orders": "node scripts/sync-shopify-orders.js",
+    "sync:shopify-products": "node scripts/sync-shopify-products.js"
   },
   "keywords": [],
   "author": "",

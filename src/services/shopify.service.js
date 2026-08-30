@@ -1,8 +1,53 @@
 const crypto = require("crypto");
 
+const axios = require("axios");
+
 const { normalizePaymentMethod } = require("../utils/paymentMethod");
 
 const SHOPIFY_ID_PREFIX = "shopify-";
+const SHOPIFY_API_VERSION = "2026-07";
+const SHOPIFY_PAGE_LIMIT = 250;
+const SHOPIFY_PRODUCTS_QUERY = `
+  query ShopifyProducts($first: Int!, $after: String) {
+    products(first: $first, after: $after) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      edges {
+        node {
+          id
+          legacyResourceId
+          title
+          handle
+          status
+          vendor
+          productType
+          tags
+          createdAt
+          updatedAt
+          featuredImage { url }
+          images(first: 20) {
+            edges { node { url } }
+          }
+          variants(first: 100) {
+            edges {
+              node {
+                id
+                legacyResourceId
+                sku
+                barcode
+                price
+                inventoryQuantity
+                title
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
 const SHOPIFY_ORDER_TOPICS = new Set([
   "orders/create",
   "orders/updated",
@@ -221,9 +266,258 @@ function unwrapShopifyOrder(payload) {
 function stripShopifyGid(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
-  const match = raw.match(/gid:\/\/shopify\/Order\/(\d+)/i);
+  const match = raw.match(/gid:\/\/shopify\/[^/]+\/(\d+)/i);
   if (match) return match[1];
   return raw;
+}
+
+function getShopifyAccessToken() {
+  return String(process.env.SHOPIFY_ACCESS_TOKEN || "").trim();
+}
+
+function parseShopifyNextPageInfo(linkHeader) {
+  const link = String(linkHeader || "");
+  const nextMatch = link.match(
+    /<[^>]*[?&]page_info=([^&>]+)[^>]*>; rel="next"/,
+  );
+  return nextMatch ? decodeURIComponent(nextMatch[1]) : "";
+}
+
+function formatShopifyErrorBody(data) {
+  if (data == null) return "";
+  if (typeof data === "string") {
+    const trimmed = data.trim();
+    const titleMatch = trimmed.match(/<title>([^<]+)<\/title>/i);
+    if (titleMatch) return titleMatch[1].trim();
+    return trimmed.slice(0, 300);
+  }
+  if (typeof data.errors === "string") return data.errors;
+  if (Array.isArray(data.errors)) {
+    return data.errors
+      .map((item) => item?.message || JSON.stringify(item))
+      .filter(Boolean)
+      .join("; ");
+  }
+  if (data.errors && typeof data.errors === "object") {
+    return JSON.stringify(data.errors);
+  }
+  if (data.error) return String(data.error);
+  return "";
+}
+
+function shopifyAdminError(response) {
+  const details = formatShopifyErrorBody(response?.data);
+  const err = new Error(
+    details || `Shopify API returned ${response?.status}`,
+  );
+  err.code = "SHOPIFY_HTTP_ERROR";
+  err.status = response?.status;
+  err.details = response?.data;
+  return err;
+}
+
+function assertShopifyAdminConfig() {
+  const shop = getConfiguredShopDomain();
+  const token = getShopifyAccessToken();
+  if (!shop) {
+    const err = new Error("SHOPIFY_SHOP_DOMAIN is not set");
+    err.code = "MISSING_SHOPIFY_SHOP";
+    throw err;
+  }
+  if (!token) {
+    const err = new Error("SHOPIFY_ACCESS_TOKEN is not set");
+    err.code = "MISSING_SHOPIFY_TOKEN";
+    throw err;
+  }
+  return { shop, token };
+}
+
+function unwrapGraphqlConnection(connection) {
+  if (!connection) return [];
+  if (Array.isArray(connection.nodes)) return connection.nodes.filter(Boolean);
+  if (Array.isArray(connection.edges)) {
+    return connection.edges.map((edge) => edge?.node).filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeGraphqlProduct(node) {
+  if (!node || typeof node !== "object") return null;
+  const variants = unwrapGraphqlConnection(node.variants).map((variant) => ({
+    id: variant.legacyResourceId || stripShopifyGid(variant.id),
+    sku: variant.sku,
+    barcode: variant.barcode,
+    price: variant.price,
+    inventory_quantity: variant.inventoryQuantity,
+    title: variant.title,
+    admin_graphql_api_id: variant.id,
+  }));
+  const images = unwrapGraphqlConnection(node.images).map((image) => ({
+    src: image.url || image.src,
+    url: image.url || image.src,
+  }));
+  const featured = firstNonEmptyString(
+    node.featuredImage?.url,
+    images[0]?.src,
+  );
+
+  return {
+    id: node.legacyResourceId || stripShopifyGid(node.id),
+    admin_graphql_api_id: node.id,
+    title: node.title,
+    handle: node.handle,
+    status: node.status,
+    vendor: node.vendor,
+    product_type: node.productType,
+    tags: node.tags,
+    created_at: node.createdAt,
+    updated_at: node.updatedAt,
+    variants,
+    images,
+    image: featured ? { src: featured } : undefined,
+  };
+}
+
+async function shopifyGraphql(query, variables = {}) {
+  const { shop, token } = assertShopifyAdminConfig();
+  const response = await axios.post(
+    `https://${shop}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+    { query, variables },
+    {
+      headers: {
+        "X-Shopify-Access-Token": token,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      timeout: 60000,
+      validateStatus: () => true,
+    },
+  );
+
+  if (response.status >= 400) {
+    throw shopifyAdminError(response);
+  }
+
+  const graphqlErrors = response.data?.errors;
+  if (Array.isArray(graphqlErrors) && graphqlErrors.length) {
+    const err = new Error(
+      graphqlErrors.map((item) => item?.message || JSON.stringify(item)).join("; "),
+    );
+    err.code = "SHOPIFY_GRAPHQL_ERROR";
+    err.status = 502;
+    err.details = graphqlErrors;
+    throw err;
+  }
+
+  return response.data?.data || {};
+}
+
+async function fetchShopifyProductsPage({
+  after = null,
+  limit = SHOPIFY_PAGE_LIMIT,
+} = {}) {
+  const pageLimit = Math.min(
+    SHOPIFY_PAGE_LIMIT,
+    Math.max(1, Number(limit) || SHOPIFY_PAGE_LIMIT),
+  );
+  const data = await shopifyGraphql(SHOPIFY_PRODUCTS_QUERY, {
+    first: pageLimit,
+    after,
+  });
+  const connection = data.products || {};
+  const nodes = unwrapGraphqlConnection(connection);
+  return {
+    products: nodes.map(normalizeGraphqlProduct).filter(Boolean),
+    nextCursor: connection.pageInfo?.hasNextPage
+      ? connection.pageInfo.endCursor || ""
+      : "",
+  };
+}
+
+/**
+ * Pulls every Shopify product page (active, draft, archived) via GraphQL Admin API.
+ */
+async function fetchAllShopifyProducts({
+  limit = SHOPIFY_PAGE_LIMIT,
+  maxPages = 100,
+} = {}) {
+  const products = [];
+  let after = null;
+  let pages = 0;
+
+  for (;;) {
+    const page = await fetchShopifyProductsPage({ after, limit });
+    pages += 1;
+    products.push(...page.products);
+    if (!page.nextCursor || pages >= maxPages) break;
+    after = page.nextCursor;
+  }
+
+  return products;
+}
+
+function resolveShopifyProductId(product) {
+  return firstNonEmptyString(
+    stripShopifyGid(product?.legacyResourceId),
+    stripShopifyGid(product?.legacy_resource_id),
+    stripShopifyGid(product?.id),
+    stripShopifyGid(product?.admin_graphql_api_id),
+    stripShopifyGid(product?.adminGraphqlApiId),
+    stripShopifyGid(product?.product_id),
+    stripShopifyGid(product?.productId),
+  );
+}
+
+function pickShopifyVariantSkus(product) {
+  const variants = Array.isArray(product?.variants) ? product.variants : [];
+  const skus = [];
+  const seen = new Set();
+  for (const variant of variants) {
+    const sku = firstNonEmptyString(variant?.sku, variant?.barcode);
+    if (!sku) continue;
+    const key = sku.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    skus.push(sku);
+  }
+  return skus;
+}
+
+function pickShopifyProductImage(product) {
+  return firstNonEmptyString(
+    product?.image?.src,
+    product?.image?.url,
+    Array.isArray(product?.images) ? product.images[0]?.src : "",
+    Array.isArray(product?.images) ? product.images[0]?.url : "",
+    Array.isArray(product?.media) ? product.media[0]?.preview_image?.src : "",
+  );
+}
+
+/**
+ * Maps a Shopify Admin REST product into the local `products` table row.
+ * Uses easyorder_id = shopify-{id} so EasyOrder rows are never overwritten.
+ */
+function mapShopifyProductToCatalogRow(product) {
+  if (!product || typeof product !== "object") return null;
+  const numericId = resolveShopifyProductId(product);
+  if (!numericId) return null;
+
+  const skus = pickShopifyVariantSkus(product);
+  const image = pickShopifyProductImage(product);
+
+  return {
+    easyorder_id: `${SHOPIFY_ID_PREFIX}${numericId}`,
+    name: firstNonEmptyString(product.title, product.name) || null,
+    sku: skus[0] || null,
+    raw_data: {
+      ...product,
+      platform: "shopify",
+      shopify_product_id: numericId,
+      variant_skus: skus,
+      thumbnail: image || undefined,
+    },
+    synced_at: new Date().toISOString(),
+  };
 }
 
 function resolveShopifyNumericId(order) {
@@ -618,12 +912,17 @@ function getShopifyWebhookConfigStatus() {
 
 module.exports = {
   SHOPIFY_ID_PREFIX,
+  SHOPIFY_API_VERSION,
   verifyShopifyWebhook,
   mapShopifyOrderToLocal,
+  mapShopifyProductToCatalogRow,
+  fetchAllShopifyProducts,
   isShopifyOrder,
   isGdprTopic,
   isOrderTopic,
   unwrapShopifyOrder,
   normalizeShopifyTopic,
   getShopifyWebhookConfigStatus,
+  getConfiguredShopDomain,
+  getShopifyAccessToken,
 };

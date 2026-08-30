@@ -3719,6 +3719,132 @@ function listTrendBucketKeys(from, to, granularity) {
   return keys;
 }
 
+function assembleTrendResult(from, to, gran, listBucketKeys, bucketMap, truncated) {
+  const points = listBucketKeys(from, to, gran).map((date) => {
+    const b = bucketMap.get(date) || {
+      totalOrders: 0,
+      shippedOrders: 0,
+      successfulOrders: 0,
+      total: 0,
+      totalProductUnits: 0,
+    };
+    return { date, ...finalizeTrendBucket(b) };
+  });
+
+  const summaryRaw = {
+    totalOrders: 0,
+    shippedOrders: 0,
+    successfulOrders: 0,
+    total: 0,
+    totalProductUnits: 0,
+  };
+  for (const b of bucketMap.values()) {
+    summaryRaw.totalOrders += b.totalOrders;
+    summaryRaw.shippedOrders += b.shippedOrders || 0;
+    summaryRaw.successfulOrders += b.successfulOrders || 0;
+    summaryRaw.total += b.total;
+    summaryRaw.totalProductUnits += b.totalProductUnits;
+  }
+
+  return {
+    from: from.toISOString(),
+    to: to.toISOString(),
+    granularity: gran,
+    points,
+    summary: finalizeTrendBucket(summaryRaw),
+    truncated,
+    maxRowsCap: MAX_TREND_ROWS,
+  };
+}
+
+async function tryOrdersStatsTrendRpc({
+  from,
+  to,
+  gran,
+  status,
+  order_source,
+  order_type,
+  shipping_status,
+  utm_source,
+  listBucketKeys,
+}) {
+  const { data, error } = await supabase.rpc("orders_stats_trend", {
+    p_from: from.toISOString(),
+    p_to: to.toISOString(),
+    p_granularity: gran,
+    p_status: status || null,
+    p_order_source: order_source || null,
+    p_order_type: order_type || null,
+    p_shipping_status: shipping_status || null,
+    p_utm_source: utm_source || null,
+  });
+
+  if (error) {
+    const msg = String(error.message || error.code || "");
+    if (!/could not find|does not exist|PGRST202|404/i.test(msg)) {
+      console.warn(
+        JSON.stringify({
+          source: "orders-stats-trend",
+          message: "RPC orders_stats_trend failed; using scan fallback",
+          error: msg,
+        }),
+      );
+    }
+    return null;
+  }
+  if (!Array.isArray(data)) return null;
+
+  const bucketMap = new Map();
+  for (const row of data) {
+    const key = String(row?.bucket || "").trim();
+    if (!key) continue;
+    bucketMap.set(key, {
+      totalOrders: Number(row.total_orders) || 0,
+      shippedOrders: Number(row.shipped_orders) || 0,
+      successfulOrders: Number(row.successful_orders) || 0,
+      total: Number(row.total) || 0,
+      totalProductUnits: Number(row.total_product_units) || 0,
+    });
+  }
+
+  return assembleTrendResult(from, to, gran, listBucketKeys, bucketMap, false);
+}
+
+const TREND_PAGE_CONCURRENCY = 5;
+
+async function fetchTrendPagesInParallel(buildPage, { maxRows, pageSize }) {
+  const first = await buildPage(0, pageSize);
+  if (first.error) return first;
+  const rows = [...(first.data || [])];
+  if (!rows.length || rows.length < pageSize) {
+    return { data: rows, error: null, truncated: false };
+  }
+
+  let offset = pageSize;
+  while (rows.length < maxRows) {
+    const offsets = [];
+    for (let i = 0; i < TREND_PAGE_CONCURRENCY && offset < maxRows; i += 1) {
+      offsets.push(offset);
+      offset += pageSize;
+    }
+    const pages = await Promise.all(
+      offsets.map((off) =>
+        buildPage(off, Math.min(pageSize, maxRows - off)),
+      ),
+    );
+    for (const page of pages) {
+      if (page.error) return page;
+      const data = page.data || [];
+      rows.push(...data);
+      if (data.length < pageSize) {
+        return { data: rows, error: null, truncated: false };
+      }
+    }
+  }
+
+  return { data: rows, error: null, truncated: true };
+}
+
 /**
  * Time-series for charts: same filters as GET /stats, bucketed by day (default), week, or month.
  * Default range when from/to omitted: caller should pass current month (see controller).
@@ -3839,6 +3965,27 @@ async function getOrdersStatsTimeSeries({
 
   const productIdsForTrend = normalizeProductIdList(product_id);
   const skuForStats = parseProductFilterInput(product_sku);
+  const canUseSqlTrend =
+    useEgyptBuckets &&
+    !employeeId &&
+    !productIdsForTrend.length &&
+    !skuForStats &&
+    filterOrdersByCreatedAtInRange;
+
+  if (canUseSqlTrend) {
+    const rpcResult = await tryOrdersStatsTrendRpc({
+      from,
+      to,
+      gran,
+      status: listStatusFilterNorm,
+      order_source,
+      order_type,
+      shipping_status,
+      utm_source,
+      listBucketKeys,
+    });
+    if (rpcResult) return rpcResult;
+  }
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
     let nextQ = q;
@@ -3860,135 +4007,115 @@ async function getOrdersStatsTimeSeries({
   let truncated = false;
   let trendSelect = employeeScope ? TREND_SELECT_FULL : TREND_SELECT_SLIM;
 
+  function buildTrendPageQuery(chunk, offset, pageSize) {
+    let q = supabase.from(ORDERS_TABLE).select(trendSelect);
+    const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
+    if (scoped.skip) return null;
+    q = scoped.nextQ;
+
+    if (from && filterOrdersByCreatedAtInRange) {
+      q = q.gte("created_at", from.toISOString());
+    }
+    if (to && filterOrdersByCreatedAtInRange) {
+      q = q.lte("created_at", to.toISOString());
+    }
+    q = q.order("created_at", { ascending: true });
+    q = applyStatsRawContains(q, null, null);
+    if (listStatusFilterNorm != null) {
+      const statuses =
+        listStatusFilterNorm === "pending"
+          ? ["new", "pending"]
+          : [listStatusFilterNorm];
+      q = q.in("status", statuses);
+    } else {
+      q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
+    }
+    return q.range(offset, offset + pageSize - 1);
+  }
+
   for (const chunk of chunks) {
-    let offset = 0;
-    for (;;) {
-      if (rowCount >= MAX_TREND_ROWS) {
-        truncated = true;
-        break;
+    if (rowCount >= MAX_TREND_ROWS) {
+      truncated = true;
+      break;
+    }
+
+    const remaining = MAX_TREND_ROWS - rowCount;
+    const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
+    let pageResult = await fetchTrendPagesInParallel(
+      (offset, size) => {
+        const q = buildTrendPageQuery(chunk, offset, size);
+        if (!q) return Promise.resolve({ data: [], error: null });
+        return q;
+      },
+      { maxRows: remaining, pageSize },
+    );
+
+    if (pageResult.error && !employeeScope && trendSelect === TREND_SELECT_SLIM) {
+      trendSelect = TREND_SELECT_FULL;
+      pageResult = await fetchTrendPagesInParallel(
+        (offset, size) => {
+          const q = buildTrendPageQuery(chunk, offset, size);
+          if (!q) return Promise.resolve({ data: [], error: null });
+          return q;
+        },
+        { maxRows: remaining, pageSize },
+      );
+    }
+    if (pageResult.error) throw new Error(pageResult.error.message);
+    if (pageResult.truncated) truncated = true;
+
+    for (const row of pageResult.data || []) {
+      if (!orderRowCountsForEmployeeScope(row, employeeScope)) {
+        continue;
       }
+      rowCount += 1;
+      const key = bucketKeyForDate(row.created_at, gran);
+      if (!key) continue;
 
-      let q = supabase.from(ORDERS_TABLE).select(trendSelect);
-      const scoped = applyStatsOrderChunkAndProductFilter(q, chunk);
-      if (scoped.skip) break;
-      q = scoped.nextQ;
-
-      if (from && filterOrdersByCreatedAtInRange) {
-        q = q.gte("created_at", from.toISOString());
-      }
-      if (to && filterOrdersByCreatedAtInRange) {
-        q = q.lte("created_at", to.toISOString());
-      }
-      q = q.order("created_at", { ascending: true });
-      q = applyStatsRawContains(q, null, null);
-      if (listStatusFilterNorm != null) {
-        const statuses =
-          listStatusFilterNorm === "pending"
-            ? ["new", "pending"]
-            : [listStatusFilterNorm];
-        q = q.in("status", statuses);
-      } else {
-        q = q.in("status", STATS_COUNTABLE_DB_STATUSES);
-      }
-
-      const remaining = MAX_TREND_ROWS - rowCount;
-      const pageSize = Math.min(LOG_SELECT_PAGE_SIZE, remaining);
-      q = q.range(offset, offset + pageSize - 1);
-
-      const { data, error } = await q;
-      if (error) {
-        if (!employeeScope && trendSelect === TREND_SELECT_SLIM) {
-          trendSelect = TREND_SELECT_FULL;
-          continue;
-        }
-        throw new Error(error.message);
-      }
-      if (!data || data.length === 0) break;
-
-      for (const row of data) {
-        if (!orderRowCountsForEmployeeScope(row, employeeScope)) {
-          continue;
-        }
-        rowCount += 1;
-        const key = bucketKeyForDate(row.created_at, gran);
-        if (!key) continue;
-
-        if (!bucketMap.has(key)) {
-          bucketMap.set(key, {
-            totalOrders: 0,
-            shippedOrders: 0,
-            successfulOrders: 0,
-            total: 0,
-            totalProductUnits: 0,
-          });
-        }
-        const b = bucketMap.get(key);
-        const raw = slimTrendRawFromRow(row);
-
-        if (
-          productIdFiltersForUnits.length &&
-          !rawHasAnySelectedProduct(raw, productIdFiltersForUnits)
-        ) {
-          continue;
-        }
-
-        b.totalOrders += 1;
-        if (isStatsShippedOrder(row)) {
-          b.shippedOrders += 1;
-        }
-        if (isStatsSuccessfulOrder(row, raw)) {
-          b.successfulOrders += 1;
-        }
-        b.total += productIdFiltersForUnits.length
-          ? sumMatchingLineRevenueFromRaw(raw, productIdFiltersForUnits)
-          : pickOrderTotalCost(raw);
-        b.totalProductUnits += sumLineQuantitiesFromRaw(raw, {
-          productIdFilters: productIdFiltersForUnits,
+      if (!bucketMap.has(key)) {
+        bucketMap.set(key, {
+          totalOrders: 0,
+          shippedOrders: 0,
+          successfulOrders: 0,
+          total: 0,
+          totalProductUnits: 0,
         });
       }
+      const b = bucketMap.get(key);
+      const raw = slimTrendRawFromRow(row);
 
-      if (data.length < pageSize) break;
-      offset += pageSize;
+      if (
+        productIdFiltersForUnits.length &&
+        !rawHasAnySelectedProduct(raw, productIdFiltersForUnits)
+      ) {
+        continue;
+      }
+
+      b.totalOrders += 1;
+      if (isStatsShippedOrder(row)) {
+        b.shippedOrders += 1;
+      }
+      if (isStatsSuccessfulOrder(row, raw)) {
+        b.successfulOrders += 1;
+      }
+      b.total += productIdFiltersForUnits.length
+        ? sumMatchingLineRevenueFromRaw(raw, productIdFiltersForUnits)
+        : pickOrderTotalCost(raw);
+      b.totalProductUnits += sumLineQuantitiesFromRaw(raw, {
+        productIdFilters: productIdFiltersForUnits,
+      });
     }
     if (truncated) break;
   }
 
-  const points = listBucketKeys(from, to, gran).map((date) => {
-    const b = bucketMap.get(date) || {
-      totalOrders: 0,
-      shippedOrders: 0,
-      successfulOrders: 0,
-      total: 0,
-      totalProductUnits: 0,
-    };
-    return { date, ...finalizeTrendBucket(b) };
-  });
-
-  const summaryRaw = {
-    totalOrders: 0,
-    shippedOrders: 0,
-    successfulOrders: 0,
-    total: 0,
-    totalProductUnits: 0,
-  };
-  for (const b of bucketMap.values()) {
-    summaryRaw.totalOrders += b.totalOrders;
-    summaryRaw.shippedOrders += b.shippedOrders || 0;
-    summaryRaw.successfulOrders += b.successfulOrders || 0;
-    summaryRaw.total += b.total;
-    summaryRaw.totalProductUnits += b.totalProductUnits;
-  }
-  const summary = finalizeTrendBucket(summaryRaw);
-
-  return {
-    from: from.toISOString(),
-    to: to.toISOString(),
-    granularity: gran,
-    points,
-    summary,
+  return assembleTrendResult(
+    from,
+    to,
+    gran,
+    listBucketKeys,
+    bucketMap,
     truncated,
-    maxRowsCap: MAX_TREND_ROWS,
-  };
+  );
 }
 
 const MAX_PRODUCT_SALES_ROWS = 50000;
@@ -4011,8 +4138,23 @@ function finalizeProductSalesBucket(bucket) {
   };
 }
 
+function expandProductCatalogLookupIds(productIds) {
+  const out = new Set();
+  for (const raw of productIds || []) {
+    const id = String(raw || "").trim();
+    if (!id) continue;
+    out.add(id);
+    if (id.toLowerCase().startsWith("shopify-")) {
+      out.add(id.slice("shopify-".length));
+    } else if (/^\d+$/.test(id)) {
+      out.add(`shopify-${id}`);
+    }
+  }
+  return [...out];
+}
+
 async function loadProductCatalogMeta(productIds) {
-  const ids = [...new Set(productIds.filter(Boolean))];
+  const ids = expandProductCatalogLookupIds(productIds);
   const map = new Map();
   if (!ids.length) return map;
 
@@ -4024,10 +4166,15 @@ async function loadProductCatalogMeta(productIds) {
     if (error) continue;
     for (const row of data || []) {
       if (row?.easyorder_id == null) continue;
-      map.set(String(row.easyorder_id), {
+      const meta = {
         name: row.name ?? null,
         sku: row.sku ?? null,
-      });
+      };
+      const eid = String(row.easyorder_id);
+      map.set(eid, meta);
+      if (eid.toLowerCase().startsWith("shopify-")) {
+        map.set(eid.slice("shopify-".length), meta);
+      }
     }
   }
 
