@@ -135,6 +135,72 @@ function productIdLookupCandidates(productId) {
   return [...new Set(candidates)];
 }
 
+/** Known catalog twins whose titles differ by more than punctuation. */
+const PRODUCT_NAME_ALIAS_GROUPS = [
+  ["مخدة ميموري فوم - رويال فندقية", "مخدة ميموري فوم - رويال ملكية"],
+];
+
+function normalizeProductNameKey(name) {
+  return String(name || "")
+    .normalize("NFC")
+    .replace(/[\u064B-\u065F\u0670\u0640]/g, "")
+    .replace(/[إأآٱا]/g, "ا")
+    .replace(/[ىي]/g, "ي")
+    .replace(/ة/g, "ه")
+    .toLowerCase()
+    .replace(/(^|\s)طبيه(\s|$)/g, " ")
+    .replace(/[x×*]/gi, "")
+    .replace(/[^\u0600-\u06FFa-z0-9]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function canonicalProductNameKey(name) {
+  const key = normalizeProductNameKey(name);
+  if (!key) return "";
+  for (const group of PRODUCT_NAME_ALIAS_GROUPS) {
+    const keys = group.map(normalizeProductNameKey);
+    if (keys.includes(key)) return keys[0];
+  }
+  return key;
+}
+
+function productNamesMatch(left, right) {
+  const a = canonicalProductNameKey(left);
+  const b = canonicalProductNameKey(right);
+  return Boolean(a && b && a === b);
+}
+
+async function resolveCatalogTwinIds(productId) {
+  const candidates = new Set(productIdLookupCandidates(productId));
+  if (!candidates.size) return [];
+
+  const { data, error } = await supabase
+    .from(PRODUCTS_TABLE)
+    .select("easyorder_id,name");
+  if (error) throw new Error(error.message);
+
+  const rows = data || [];
+  const seedKeys = new Set();
+  for (const row of rows) {
+    const id = String(row?.easyorder_id || "").trim();
+    if (!candidates.has(id)) continue;
+    const key = canonicalProductNameKey(row?.name);
+    if (key) seedKeys.add(key);
+  }
+
+  if (!seedKeys.size) return [...candidates];
+
+  for (const row of rows) {
+    const key = canonicalProductNameKey(row?.name);
+    if (!key || !seedKeys.has(key)) continue;
+    const id = String(row?.easyorder_id || "").trim();
+    if (id) candidates.add(id);
+  }
+
+  return [...candidates];
+}
+
 async function syncProductsFromShopify() {
   const items = await fetchAllShopifyProducts();
   const rows = [];
@@ -234,5 +300,8 @@ module.exports = {
   getProductsFromDb,
   getProductFromDbById,
   productIdLookupCandidates,
+  canonicalProductNameKey,
+  productNamesMatch,
+  resolveCatalogTwinIds,
   PRODUCTS_TABLE,
 };

@@ -1,7 +1,9 @@
 const supabase = require("../config/supabase");
 const {
-  PRODUCTS_TABLE,
   productIdLookupCandidates,
+  canonicalProductNameKey,
+  productNamesMatch,
+  resolveCatalogTwinIds,
 } = require("./products.service");
 
 const MAPPINGS_TABLE =
@@ -818,11 +820,29 @@ function normalizeSizeKey(value) {
   return digits ? digits[0] : raw;
 }
 
+function lookupMapEntryByIdOrName(mapObj, productId, name) {
+  const ids = productIdLookupCandidates(productId);
+  for (const id of ids) {
+    if (id && mapObj[id]) {
+      return { entityId: id, entry: mapObj[id] };
+    }
+  }
+
+  if (!canonicalProductNameKey(name)) return null;
+  for (const [entityId, entry] of Object.entries(mapObj || {})) {
+    if (productNamesMatch(entry?.name, name)) {
+      return { entityId, entry };
+    }
+  }
+  return null;
+}
+
 function resolveMappedSkuCandidatesForLine(line, maps) {
   const variantId = pickLineVariantId(line);
   const productId = pickLineProductId(line);
   const size = pickLineSize(line);
   const normalizedSize = normalizeSizeKey(size);
+  const displayName = pickLineDisplayName(line);
 
   if (variantId && maps.variantSkuMap[variantId]) {
     const entry = maps.variantSkuMap[variantId];
@@ -834,8 +854,13 @@ function resolveMappedSkuCandidatesForLine(line, maps) {
     };
   }
 
-  if (productId && maps.sizeSkuMap[productId]) {
-    const entry = maps.sizeSkuMap[productId];
+  const sizeMatch = lookupMapEntryByIdOrName(
+    maps.sizeSkuMap,
+    productId,
+    displayName,
+  );
+  if (sizeMatch) {
+    const entry = sizeMatch.entry;
     const sizes = entry.sizes || {};
 
     if (normalizedSize && sizes[normalizedSize]) {
@@ -843,7 +868,7 @@ function resolveMappedSkuCandidatesForLine(line, maps) {
         productName: pickLineDisplayName(line, entry.name),
         skus: normalizeSkus(sizes[normalizedSize]),
         mappingType: "size",
-        entityId: productId,
+        entityId: sizeMatch.entityId,
         size: normalizedSize,
       };
     }
@@ -858,7 +883,7 @@ function resolveMappedSkuCandidatesForLine(line, maps) {
             productName: pickLineDisplayName(line, entry.name),
             skus: normalizeSkus(skus),
             mappingType: "size",
-            entityId: productId,
+            entityId: sizeMatch.entityId,
             size: sizeKey,
           };
         }
@@ -866,13 +891,18 @@ function resolveMappedSkuCandidatesForLine(line, maps) {
     }
   }
 
-  if (productId && maps.productSkuMap[productId]) {
-    const entry = maps.productSkuMap[productId];
+  const productMatch = lookupMapEntryByIdOrName(
+    maps.productSkuMap,
+    productId,
+    displayName,
+  );
+  if (productMatch) {
+    const entry = productMatch.entry;
     return {
       productName: pickLineDisplayName(line, entry.name),
       skus: normalizeSkus(entry.skus),
       mappingType: "product",
-      entityId: productId,
+      entityId: productMatch.entityId,
     };
   }
 
@@ -1094,36 +1124,7 @@ function buildOptionsFromSizeRow(row, inventoryDetailsMap, requiredQuantity) {
 }
 
 async function resolveMappingProductIds(productId) {
-  const candidates = new Set(productIdLookupCandidates(productId));
-  if (!candidates.size) return [];
-
-  const { data, error } = await supabase
-    .from(PRODUCTS_TABLE)
-    .select("easyorder_id,name")
-    .in("easyorder_id", [...candidates]);
-  if (error) throw new Error(error.message);
-
-  const names = new Set();
-  for (const row of data || []) {
-    const id = String(row?.easyorder_id || "").trim();
-    if (id) candidates.add(id);
-    const name = String(row?.name || "").trim();
-    if (name) names.add(name);
-  }
-
-  if (names.size) {
-    const { data: twins, error: twinsError } = await supabase
-      .from(PRODUCTS_TABLE)
-      .select("easyorder_id,name")
-      .in("name", [...names]);
-    if (twinsError) throw new Error(twinsError.message);
-    for (const row of twins || []) {
-      const id = String(row?.easyorder_id || "").trim();
-      if (id) candidates.add(id);
-    }
-  }
-
-  return [...candidates];
+  return resolveCatalogTwinIds(productId);
 }
 
 async function fetchMappingRowsForProduct(productId) {
