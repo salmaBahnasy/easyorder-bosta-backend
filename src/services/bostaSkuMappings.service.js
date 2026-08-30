@@ -1,4 +1,8 @@
 const supabase = require("../config/supabase");
+const {
+  PRODUCTS_TABLE,
+  productIdLookupCandidates,
+} = require("./products.service");
 
 const MAPPINGS_TABLE =
   process.env.SUPABASE_BOSTA_SKU_MAPPINGS_TABLE || "bosta_sku_mappings";
@@ -1089,33 +1093,63 @@ function buildOptionsFromSizeRow(row, inventoryDetailsMap, requiredQuantity) {
   });
 }
 
+async function resolveMappingProductIds(productId) {
+  const candidates = new Set(productIdLookupCandidates(productId));
+  if (!candidates.size) return [];
+
+  const { data, error } = await supabase
+    .from(PRODUCTS_TABLE)
+    .select("easyorder_id,name")
+    .in("easyorder_id", [...candidates]);
+  if (error) throw new Error(error.message);
+
+  const names = new Set();
+  for (const row of data || []) {
+    const id = String(row?.easyorder_id || "").trim();
+    if (id) candidates.add(id);
+    const name = String(row?.name || "").trim();
+    if (name) names.add(name);
+  }
+
+  if (names.size) {
+    const { data: twins, error: twinsError } = await supabase
+      .from(PRODUCTS_TABLE)
+      .select("easyorder_id,name")
+      .in("name", [...names]);
+    if (twinsError) throw new Error(twinsError.message);
+    for (const row of twins || []) {
+      const id = String(row?.easyorder_id || "").trim();
+      if (id) candidates.add(id);
+    }
+  }
+
+  return [...candidates];
+}
+
 async function fetchMappingRowsForProduct(productId) {
-  const id = String(productId || "").trim();
+  const ids = await resolveMappingProductIds(productId);
+  if (!ids.length) {
+    return { products: [], variants: [], sizes: [], unmapped: null };
+  }
 
   const [productRes, variantRes, sizeRes, unmappedRes] = await Promise.all([
     supabase
       .from(MAPPINGS_TABLE)
       .select("*")
       .eq("mapping_type", "product")
-      .eq("entity_id", id)
-      .maybeSingle(),
+      .in("entity_id", ids),
     supabase
       .from(MAPPINGS_TABLE)
       .select("*")
       .eq("mapping_type", "variant")
-      .eq("product_id", id)
+      .in("product_id", ids)
       .order("name", { ascending: true }),
     supabase
       .from(MAPPINGS_TABLE)
       .select("*")
       .eq("mapping_type", "size")
-      .eq("entity_id", id)
-      .maybeSingle(),
-    supabase
-      .from(UNMAPPED_TABLE)
-      .select("*")
-      .eq("product_id", id)
-      .maybeSingle(),
+      .in("entity_id", ids),
+    supabase.from(UNMAPPED_TABLE).select("*").in("product_id", ids),
   ]);
 
   for (const res of [productRes, variantRes, sizeRes, unmappedRes]) {
@@ -1125,10 +1159,10 @@ async function fetchMappingRowsForProduct(productId) {
   }
 
   return {
-    product: productRes.data || null,
+    products: productRes.data || [],
     variants: variantRes.data || [],
-    size: sizeRes.data || null,
-    unmapped: unmappedRes.data || null,
+    sizes: sizeRes.data || [],
+    unmapped: (unmappedRes.data || [])[0] || null,
   };
 }
 
@@ -1151,9 +1185,9 @@ async function getBostaSkuOptionsForProduct(productId, options = {}) {
 
   const mappingOptions = [];
 
-  if (rows.product) {
+  for (const product of rows.products) {
     mappingOptions.push(
-      buildOptionBase(rows.product, inventoryDetailsMap, requiredQuantity),
+      buildOptionBase(product, inventoryDetailsMap, requiredQuantity),
     );
   }
 
@@ -1163,9 +1197,9 @@ async function getBostaSkuOptionsForProduct(productId, options = {}) {
     );
   }
 
-  if (rows.size) {
+  for (const size of rows.sizes) {
     mappingOptions.push(
-      ...buildOptionsFromSizeRow(rows.size, inventoryDetailsMap, requiredQuantity),
+      ...buildOptionsFromSizeRow(size, inventoryDetailsMap, requiredQuantity),
     );
   }
 
@@ -1193,9 +1227,9 @@ async function getBostaSkuOptionsForProduct(productId, options = {}) {
   });
 
   const productName =
-    rows.product?.name ||
+    rows.products[0]?.name ||
     rows.variants[0]?.name?.split(" - ")[0] ||
-    rows.size?.name ||
+    rows.sizes[0]?.name ||
     "";
 
   return {

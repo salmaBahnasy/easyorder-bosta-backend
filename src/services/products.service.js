@@ -233,5 +233,6 @@ module.exports = {
   syncProductsFromShopify,
   getProductsFromDb,
   getProductFromDbById,
+  productIdLookupCandidates,
   PRODUCTS_TABLE,
 };
