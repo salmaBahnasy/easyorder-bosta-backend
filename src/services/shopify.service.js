@@ -312,8 +312,33 @@ function shopifyAdminError(response) {
   );
   err.code = "SHOPIFY_HTTP_ERROR";
   err.status = response?.status;
+  err.statusCode = response?.status;
   err.details = response?.data;
   return err;
+}
+
+function isShopifyAuthFailure(error) {
+  const status = Number(error?.status || error?.statusCode || error?.response?.status);
+  if (
+    error?.code === "MISSING_SHOPIFY_TOKEN" ||
+    error?.code === "MISSING_SHOPIFY_SHOP"
+  ) {
+    return true;
+  }
+  if (status === 401 || status === 403) return true;
+  const text = [
+    error?.message,
+    formatShopifyErrorBody(error?.details),
+    formatShopifyErrorBody(error?.response?.data),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return (
+    text.includes("invalid api key") ||
+    text.includes("unrecognized login") ||
+    text.includes("access token")
+  );
 }
 
 function assertShopifyAdminConfig() {
@@ -967,10 +992,7 @@ async function refreshCustomerStatusFromShopify(localOrder) {
   try {
     remote = await fetchShopifyOrderByNumericId(numericId);
   } catch (error) {
-    if (
-      error.code === "MISSING_SHOPIFY_TOKEN" ||
-      error.code === "MISSING_SHOPIFY_SHOP"
-    ) {
+    if (isShopifyAuthFailure(error)) {
       return {
         order: localOrder,
         easyOrdersConfirm: {
@@ -984,6 +1006,10 @@ async function refreshCustomerStatusFromShopify(localOrder) {
         customerStatus: previousCustomerStatus,
         changed: false,
         source: "shopify",
+        warning:
+          error.code === "SHOPIFY_HTTP_ERROR"
+            ? "shopify_token_rejected"
+            : error.code,
       };
     }
     throw error;

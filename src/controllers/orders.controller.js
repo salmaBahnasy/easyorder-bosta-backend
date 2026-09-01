@@ -1238,11 +1238,18 @@ async function refreshCustomerStatus(req, res) {
       return;
     }
 
-    const status = error.statusCode || error.response?.status || 500;
-    res.status(status).json({
+    const isShopifyOrderId = String(req.params.orderId || "")
+      .toLowerCase()
+      .startsWith("shopify-");
+    const isShopifyError = String(error.code || "").startsWith("SHOPIFY_");
+    const sourceLabel =
+      isShopifyOrderId || isShopifyError ? "Shopify" : "EasyOrders";
+    const status = error.statusCode || error.status || error.response?.status || 500;
+    res.status(status >= 400 && status < 600 ? status : 502).json({
       success: false,
-      message: "Failed to refresh customer status from EasyOrders",
+      message: `Failed to refresh customer status from ${sourceLabel}`,
       error: error.response?.data || error.message,
+      code: error.code || null,
       orderId: req.params.orderId,
     });
   }
