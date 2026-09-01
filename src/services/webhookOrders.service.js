@@ -15,6 +15,11 @@ const {
 } = require("../utils/orderReference");
 const { normalizePaymentMethod } = require("../utils/paymentMethod");
 const { isShopifyOrder } = require("./shopify.service");
+const {
+  loadProductIdentityIndex,
+  canonicalizeProductId,
+  expandProductAliasIds,
+} = require("./products.service");
 
 const ALLOWED_ORDER_STATUSES = [
   "canceled",
@@ -2283,16 +2288,21 @@ async function getWebhookOrders({
     scopedOrderIds,
   );
 
-  const pidForProduct = normalizeProductIdForCartFilter(product_id);
-  const skuForProduct = parseProductFilterInput(product_sku);
-  const useProductUuidContains =
-    pidForProduct && UUID_LIKE.test(pidForProduct) && !skuForProduct;
+  let expandedProductIds = normalizeProductIdList(product_id);
+  if (expandedProductIds.length) {
+    try {
+      const identity = await loadProductIdentityIndex();
+      expandedProductIds = expandProductAliasIds(expandedProductIds, identity);
+    } catch (_error) {
+      // keep the original product id if catalog lookup fails
+    }
+  }
 
   function applyProductListFilters(q) {
-    if (useProductUuidContains) {
-      return applyProductUuidCartContainsOr(q, pidForProduct);
-    }
-    return applyProductCartIlikeFilters(q, { product_id, product_sku });
+    return applySelectedProductsFilter(q, {
+      productIds: expandedProductIds,
+      product_sku,
+    });
   }
 
   if (membershipOrderIds && membershipNeedsChunkedFetch(membershipOrderIds)) {
@@ -2980,21 +2990,26 @@ async function getOrdersStatistics({
     return q;
   }
 
-  const pidForStats = normalizeProductIdForCartFilter(product_id);
-  const skuForStats = parseProductFilterInput(product_sku);
-  const useProductUuidContains =
-    pidForStats && UUID_LIKE.test(pidForStats) && !skuForStats;
-  const productIdForUnitSum =
-    pidForStats && UUID_LIKE.test(pidForStats) ? pidForStats : null;
+  let expandedProductIds = normalizeProductIdList(product_id);
+  if (expandedProductIds.length) {
+    try {
+      const identity = await loadProductIdentityIndex();
+      expandedProductIds = expandProductAliasIds(expandedProductIds, identity);
+    } catch (_error) {
+      // keep the original product id if catalog lookup fails
+    }
+  }
+  const productIdFiltersForUnits = expandedProductIds;
 
   function applyStatsOrderChunkAndProductFilter(q, chunk) {
     let nextQ = q;
     if (chunk && chunk.length) {
       nextQ = nextQ.in("order_id", chunk);
     }
-    if (useProductUuidContains) {
-      nextQ = applyProductUuidCartContainsOr(nextQ, pidForStats);
-    }
+    nextQ = applySelectedProductsFilter(nextQ, {
+      productIds: expandedProductIds,
+      product_sku,
+    });
     return { nextQ, skip: false };
   }
 
@@ -3036,9 +3051,6 @@ async function getOrdersStatistics({
         q = q.lte("created_at", to.toISOString());
       }
       q = applyStatsRawContains(q);
-      if (!useProductUuidContains) {
-        q = applyProductCartIlikeFilters(q, { product_id, product_sku });
-      }
       if (listStatusFilterNorm != null) {
         const statuses =
           listStatusFilterNorm === "pending"
@@ -3100,7 +3112,7 @@ async function getOrdersStatistics({
         }
 
         totalProductUnits += sumLineQuantitiesFromRaw(raw, {
-          productIdFilter: productIdForUnitSum,
+          productIdFilters: productIdFiltersForUnits,
         });
         total += pickOrderTotalCost(raw);
       }
@@ -3401,7 +3413,7 @@ function incrementAnalyticsBucket(map, key) {
 }
 
 function aggregateOrdersAnalyticsRows(rows, options = {}) {
-  const { productIdFilter = null } = options;
+  const { productIdFilter = null, productIdFilters = null } = options;
   const byOrderSource = Object.create(null);
   const byOrderType = Object.create(null);
   const byOrderStatus = Object.create(null);
@@ -3418,7 +3430,10 @@ function aggregateOrdersAnalyticsRows(rows, options = {}) {
         : {};
 
     totalCost += pickOrderTotalCost(raw);
-    totalProductUnits += sumLineQuantitiesFromRaw(raw, { productIdFilter });
+    totalProductUnits += sumLineQuantitiesFromRaw(raw, {
+      productIdFilter,
+      productIdFilters,
+    });
 
     const orderSource = analyticsFirstNonEmpty(
       raw.order_source,
@@ -3499,10 +3514,15 @@ async function fetchAnalyticsOrderRows({
     return q;
   }
 
-  const pidNeedle = normalizeProductIdForCartFilter(product_id);
-  const skuNeedle = parseProductFilterInput(product_sku);
-  const useProductUuidContains =
-    pidNeedle && UUID_LIKE.test(pidNeedle) && !skuNeedle;
+  let expandedProductIds = normalizeProductIdList(product_id);
+  if (expandedProductIds.length) {
+    try {
+      const identity = await loadProductIdentityIndex();
+      expandedProductIds = expandProductAliasIds(expandedProductIds, identity);
+    } catch (_error) {
+      // keep the original product id if catalog lookup fails
+    }
+  }
 
   const rows = [];
   let truncated = false;
@@ -3523,11 +3543,10 @@ async function fetchAnalyticsOrderRows({
       .order("created_at", { ascending: false });
 
     q = applyNonProductFilters(q);
-    if (useProductUuidContains) {
-      q = applyProductUuidCartContainsOr(q, pidNeedle);
-    } else {
-      q = applyProductCartIlikeFilters(q, { product_id, product_sku });
-    }
+    q = applySelectedProductsFilter(q, {
+      productIds: expandedProductIds,
+      product_sku,
+    });
 
     q = q.range(offset, offset + pageSize - 1);
 
@@ -3571,13 +3590,17 @@ async function getOrdersAnalyticsReport({
     to,
     ignoreEmployeeLogDateRange,
   });
-  const pid = normalizeProductIdForCartFilter(product_id);
-  const productIdForUnitSum =
-    pid && UUID_LIKE.test(pid) && !parseProductFilterInput(product_sku)
-      ? pid
-      : null;
+  let expandedProductIds = normalizeProductIdList(product_id);
+  if (expandedProductIds.length) {
+    try {
+      const identity = await loadProductIdentityIndex();
+      expandedProductIds = expandProductAliasIds(expandedProductIds, identity);
+    } catch (_error) {
+      // keep the original product id if catalog lookup fails
+    }
+  }
   const agg = aggregateOrdersAnalyticsRows(rows, {
-    productIdFilter: productIdForUnitSum,
+    productIdFilters: expandedProductIds,
   });
   return { ...agg, truncated, maxRowsCap: MAX_ANALYTICS_ROWS };
 }
@@ -3963,7 +3986,15 @@ async function getOrdersStatsTimeSeries({
     return q;
   }
 
-  const productIdsForTrend = normalizeProductIdList(product_id);
+  let productIdsForTrend = normalizeProductIdList(product_id);
+  if (productIdsForTrend.length) {
+    try {
+      const identity = await loadProductIdentityIndex();
+      productIdsForTrend = expandProductAliasIds(productIdsForTrend, identity);
+    } catch (_error) {
+      // keep the original product ids if catalog lookup fails
+    }
+  }
   const skuForStats = parseProductFilterInput(product_sku);
   const canUseSqlTrend =
     useEgyptBuckets &&
@@ -4161,7 +4192,7 @@ async function loadProductCatalogMeta(productIds) {
   for (const chunk of chunkArray(ids, IN_CHUNK_SIZE)) {
     const { data, error } = await supabase
       .from(PRODUCTS_TABLE)
-      .select("easyorder_id,name,sku")
+      .select("easyorder_id,name,sku,raw_data")
       .in("easyorder_id", chunk);
     if (error) continue;
     for (const row of data || []) {
@@ -4174,6 +4205,13 @@ async function loadProductCatalogMeta(productIds) {
       map.set(eid, meta);
       if (eid.toLowerCase().startsWith("shopify-")) {
         map.set(eid.slice("shopify-".length), meta);
+      }
+      const shopifyId = String(
+        row?.raw_data?.shopify_product_id || "",
+      ).trim();
+      if (shopifyId) {
+        map.set(shopifyId, meta);
+        map.set(`shopify-${shopifyId}`, meta);
       }
     }
   }
@@ -4204,7 +4242,16 @@ async function getProductSalesChart({
     ? (f, t, g) => listEgyptTrendBucketKeys(f, t, g)
     : (f, t, g) => listTrendBucketKeys(f, t, g);
 
-  const productIdFilters = normalizeProductIdList(product_id, product_ids);
+  let productIdFilters = normalizeProductIdList(product_id, product_ids);
+  let identity = null;
+  try {
+    identity = await loadProductIdentityIndex();
+    if (productIdFilters.length) {
+      productIdFilters = expandProductAliasIds(productIdFilters, identity);
+    }
+  } catch (_error) {
+    identity = null;
+  }
   const bucketKeys = listBucketKeys(from, to, gran);
 
   const productMap = new Map();
@@ -4253,7 +4300,8 @@ async function getProductSalesChart({
 
       const seenProductsInOrder = new Set();
       for (const line of parseCartItemsArray(raw)) {
-        const pid = resolveLineProductId(line);
+        const rawPid = resolveLineProductId(line);
+        const pid = canonicalizeProductId(rawPid, identity) || rawPid;
         if (!pid) continue;
         if (
           productIdFilters.length &&
@@ -4306,7 +4354,9 @@ async function getProductSalesChart({
   const catalogMeta = await loadProductCatalogMeta([...productMap.keys()]);
   const products = [...productMap.values()]
     .map((entry) => {
-      const catalog = catalogMeta.get(entry.product_id);
+      const catalog =
+        catalogMeta.get(entry.product_id) ||
+        identity?.metaByCanonical?.get(entry.product_id);
       const name = catalog?.name || entry.name || entry.product_id;
       const sku = catalog?.sku || entry.sku || null;
       const points = bucketKeys.map((date) => {
