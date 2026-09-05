@@ -988,6 +988,60 @@ async function refreshCustomerStatusFromShopify(localOrder) {
     .replace(/^gid:\/\/shopify\/Order\//i, "")
     .trim();
 
+  try {
+    const {
+      lookupEasyConfirmStatus,
+    } = require("./easyconfirm.service");
+    const fromEasyConfirm = await lookupEasyConfirmStatus({
+      ...localOrder,
+      sourceOrderId,
+      shopify_order_id: numericId || localOrder?.shopify_order_id,
+    });
+    if (fromEasyConfirm?.customerStatus) {
+      const customerStatus = fromEasyConfirm.customerStatus;
+      let order = {
+        ...localOrder,
+        customer_status: customerStatus,
+        customerStatus,
+      };
+      if (sourceOrderId) {
+        order = await mergeOrderRawDataPatch(sourceOrderId, {
+          customer_status: customerStatus,
+          customerStatus,
+          confirmation_source: "easyconfirm",
+          confirmation_status:
+            customerStatus === "canceled" ? "cancelled" : customerStatus,
+          easyconfirm_id: fromEasyConfirm.remote?.id || localOrder?.easyconfirm_id,
+          easyconfirm_external_order_id: fromEasyConfirm.externalOrderId,
+          easyconfirm_customer_synced_at: new Date().toISOString(),
+        });
+      }
+      return {
+        order,
+        easyOrdersConfirm: {
+          id: sourceOrderId,
+          shortId: localOrder?.short_id || localOrder?.shortId || null,
+          status: customerStatus,
+          customerStatus,
+          source: "easyconfirm",
+        },
+        previousCustomerStatus,
+        customerStatus,
+        changed: previousCustomerStatus !== customerStatus,
+        source: "easyconfirm",
+      };
+    }
+  } catch (error) {
+    console.warn(
+      JSON.stringify({
+        source: "easyconfirm-api",
+        level: "warn",
+        message: error.message,
+        orderId: sourceOrderId,
+      }),
+    );
+  }
+
   let remote = null;
   try {
     remote = await fetchShopifyOrderByNumericId(numericId);

@@ -4875,6 +4875,97 @@ function parseExpenseForCostChart(raw) {
 }
 
 
+async function findOrderForEasyConfirm(data = {}) {
+  const candidates = [
+    data.externalOrderId,
+    data.external_order_id,
+    data.orderId,
+    data.order_id,
+    data.id,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  for (const candidate of candidates) {
+    const ids = [candidate];
+    if (/^\d+$/.test(candidate)) ids.push(`shopify-${candidate}`);
+    for (const id of ids) {
+      try {
+        return await getWebhookOrderById(id);
+      } catch (error) {
+        if (
+          error.code !== "ORDER_NOT_FOUND" &&
+          error.code !== "INVALID_ORDER_ID"
+        ) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    const shortIds = [candidate];
+    if (candidate && !candidate.startsWith("#")) shortIds.push(`#${candidate}`);
+    const orParts = [];
+    for (const shortId of shortIds) {
+      const e = String(shortId).replace(/[,()]/g, "");
+      if (!e) continue;
+      orParts.push(
+        `raw_data->>short_id.eq.${e}`,
+        `raw_data->>shortId.eq.${e}`,
+        `raw_data->>shopify_name.eq.${e}`,
+        `raw_data->>shopify_order_number.eq.${e.replace(/^#/, "")}`,
+      );
+    }
+    if (!orParts.length) continue;
+    const { data: rows, error } = await supabase
+      .from(ORDERS_TABLE)
+      .select("*")
+      .or(orParts.join(","))
+      .limit(2);
+    if (error) throw new Error(error.message);
+    if (rows?.length === 1) return mapStoredOrderToClient(rows[0]);
+  }
+
+  const notFound = new Error("Order not found for EasyConfirm webhook");
+  notFound.code = "ORDER_NOT_FOUND";
+  throw notFound;
+}
+
+async function applyEasyConfirmCustomerStatus(payload = {}) {
+  const event = String(payload.event || "").trim().toLowerCase();
+  const data =
+    payload.data && typeof payload.data === "object" ? payload.data : {};
+
+  let customerStatus = normalizeCustomerStatusInput(
+    data.status || data.customerAction || data.customer_action,
+  );
+  if (event === "order.confirmed") customerStatus = "confirmed";
+  if (event === "order.canceled" || event === "order.cancelled") {
+    customerStatus = "canceled";
+  }
+
+  if (!CUSTOMER_STATUSES.includes(customerStatus) || customerStatus === "pending") {
+    const err = new Error(
+      "EasyConfirm payload did not include a confirmation or cancellation status",
+    );
+    err.code = "INVALID_CUSTOMER_STATUS";
+    throw err;
+  }
+
+  const order = await findOrderForEasyConfirm(data);
+  return mergeOrderRawDataPatch(order.sourceOrderId, {
+    customer_status: customerStatus,
+    customerStatus,
+    confirmation_source: "easyconfirm",
+    confirmation_status:
+      customerStatus === "canceled" ? "cancelled" : customerStatus,
+    easyconfirm_id: data.id ?? order.easyconfirm_id ?? null,
+    easyconfirm_event: payload.event ?? null,
+    easyconfirm_last_webhook_at: new Date().toISOString(),
+  });
+}
+
 module.exports = {
   addWebhookOrder,
   getWebhookOrders,
@@ -4916,4 +5007,6 @@ module.exports = {
   normalizeUtmSourceFilter,
   UTM_SOURCE_OPTIONS,
   mergeOrderRawDataPatch,
+  applyEasyConfirmCustomerStatus,
+  findOrderForEasyConfirm,
 };

@@ -138,6 +138,25 @@ async function handleShopifyWebhook(req, res) {
     }
 
     const savedOrder = await addWebhookOrder(mapped, { fromWebhook: true });
+    try {
+      const { ensureEasyConfirmOrder } = require("../services/easyconfirm.service");
+      const created = await ensureEasyConfirmOrder(savedOrder || mapped);
+      if (created?.id && savedOrder?.sourceOrderId) {
+        const { mergeOrderRawDataPatch } = require("../services/webhookOrders.service");
+        await mergeOrderRawDataPatch(savedOrder.sourceOrderId, {
+          easyconfirm_id: created.id,
+        });
+      }
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          source: "shopify-webhook",
+          level: "warn",
+          message: error.message || "EasyConfirm create skipped",
+          orderId: savedOrder?.sourceOrderId || mapped.id,
+        }),
+      );
+    }
     rememberShopifyWebhook({
       topic,
       shop: shop || null,

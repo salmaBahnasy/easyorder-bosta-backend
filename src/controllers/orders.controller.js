@@ -1199,7 +1199,12 @@ async function refreshCustomerStatus(req, res) {
       { easyOrdersConfirm: result.easyOrdersConfirm },
     );
     const source = result.source || result.easyOrdersConfirm?.source || "easyorders";
-    const sourceLabel = source === "shopify" ? "Shopify" : "EasyOrders";
+    const sourceLabel =
+      source === "easyconfirm"
+        ? "EasyConfirm"
+        : source === "shopify"
+          ? "Shopify"
+          : "EasyOrders";
 
     res.json({
       success: true,

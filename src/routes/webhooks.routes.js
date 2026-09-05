@@ -13,6 +13,9 @@ const {
   getShopifyWebhookStatus,
 } = require("../controllers/shopify.controller");
 const {
+  handleEasyConfirmWebhook,
+} = require("../controllers/easyconfirm.controller");
+const {
   toPresentation,
 } = require("../services/easyorderPresentation.service");
 
@@ -24,6 +27,7 @@ router.post("/shopify/orders", handleShopifyWebhook);
 router.post("/shopify/orders/create", handleShopifyWebhook);
 router.post("/shopify/orders/updated", handleShopifyWebhook);
 router.post("/shopify/orders/cancelled", handleShopifyWebhook);
+router.post("/easyconfirm", handleEasyConfirmWebhook);
 
 router.post("/easyorders/order-created", async (req, res) => {
   try {
